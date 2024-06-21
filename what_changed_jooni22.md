@@ -68,3 +68,43 @@ let system_message_content = "# IDENTITY
                 # EXAMPLE
                 INPUT: 'Can you describe how you would manage project dependencies in a large software development project?'
                 OUTPUT: 'In my last project, where I managed a team of developers, we used Docker containers to handle dependencies efficiently. Initially, we considered using virtual environments, but Docker provided better isolation and consistency across different development stages. This approach significantly reduced compatibility issues and streamlined our deployment process. In fact, our deployment time was cut by about 30%, which was a huge win for us.'";
+
+
+## 3. server/src/operators/model_operator.rs
+
+
+#### 1 FROM:
+        "{}/embeddings?api-version=2023-05-15",
+#### 1 TO:
+        "{}",
+
+#### 2 FROM:
+    let embedding_server_call = format!("{}/embed_sparse", server_origin);
+#### 2 TO:
+    let embedding_server_call = format!("{}", server_origin);
+
+#### 3 FROM:
+                    )
+                    .to_string(),
+#### 3 TO:
+                    ),
+
+#### 4 FROM:
+                .post(&format!("{}/embeddings?api-version=2023-05-15", url))
+#### 4 TO:
+                .post(&format!("{}", url))
+
+#### 5 FROM:
+                let embedding_server_call = format!("{}/embed_sparse", server_origin);
+#### 5 TO:
+                let embedding_server_call = format!("{}", server_origin);
+
+#### 6 FROM:
+                let embedding_server_call = format!("{}/embed_sparse", server_origin);
+#### 6 TO:
+                let embedding_server_call = format!("{}", server_origin);
+
+#### 7 FROM:
+    let embedding_server_call = format!("{}/rerank", server_origin);
+#### 7 TO:
+    let embedding_server_call = format!("{}", server_origin);
