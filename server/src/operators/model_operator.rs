@@ -110,7 +110,7 @@ pub async fn create_embedding(
     };
 
     let embeddings_resp = ureq::post(&format!(
-        "{}/embeddings?api-version=2023-05-15",
+        "{}",
         embedding_base_url
     ))
     .set("Authorization", &format!("Bearer {}", &embedding_api_key))
@@ -180,7 +180,7 @@ pub async fn get_sparse_vector(
             origin_key
         )))?;
 
-    let embedding_server_call = format!("{}/embed_sparse", server_origin);
+    let embedding_server_call = format!("{}", server_origin);
 
     let sparse_vectors = ureq::post(&embedding_server_call)
         .set("Content-Type", "application/json")
@@ -306,8 +306,7 @@ pub async fn create_embeddings(
                     format!(
                         "{}{}",
                         dataset_config.EMBEDDING_QUERY_PREFIX, &clipped_messages[0]
-                    )
-                    .to_string(),
+                    ),
                 ),
                 _ => EmbeddingInput::StringArray(clipped_messages),
             };
@@ -324,7 +323,7 @@ pub async fn create_embeddings(
 
             let vectors_resp = async move {
                 let embeddings_resp = cur_client
-                .post(&format!("{}/embeddings?api-version=2023-05-15", url))
+                .post(&format!("{}", url))
                 .header("Authorization", &format!("Bearer {}", &embedding_api_key.clone()))
                 .header("api-key", &embedding_api_key.clone())
                 .header("Content-Type", "application/json")
@@ -468,7 +467,7 @@ pub async fn get_sparse_vectors(
                         "env flag {} is not set",
                         origin_key
                     )))?;
-                let embedding_server_call = format!("{}/embed_sparse", server_origin);
+                let embedding_server_call = format!("{}", server_origin);
 
                 let sparse_embed_req = CustomSparseEmbedData {
                     inputs: thirty_boosts
@@ -543,7 +542,7 @@ pub async fn get_sparse_vectors(
                         "env flag {} is not set",
                         origin_key
                     )))?;
-                let embedding_server_call = format!("{}/embed_sparse", server_origin);
+                let embedding_server_call = format!("{}", server_origin);
 
                 let sparse_embed_req = CustomSparseEmbedData {
                     inputs: thirty_messages.to_vec(),
@@ -684,7 +683,7 @@ pub async fn cross_encoder(
 
     let server_origin: String = dataset_config.RERANKER_BASE_URL.clone();
 
-    let embedding_server_call = format!("{}/rerank", server_origin);
+    let embedding_server_call = format!("{}", server_origin);
 
     if results.is_empty() {
         return Ok(vec![]);
