@@ -8,13 +8,13 @@ Probably should work with AMD aswell, but not tested. For more info read:
 ## Basic execution
 
 ```bash
-curl -X POST "http://localhost:8000/embeddings" \
+curl -X POST "http://localhost:9200/embeddings" \
      -H "Content-Type: application/json" \
      -d '{ "input": "test", "model": "baai/bge-m3" }'
 ```
 
 ```bash
-curl -X POST "http://localhost:8000/embeddings" \
+curl -X POST "http://localhost:9200/embeddings" \
      -H "Content-Type: application/json" \
      -d '{ "input": "test", "model": "mixedbread-ai/mxbai-embed-large-v1" }'
 ```
