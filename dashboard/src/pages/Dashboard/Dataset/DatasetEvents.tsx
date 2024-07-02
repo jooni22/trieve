@@ -7,7 +7,7 @@ import {
   useContext,
 } from "solid-js";
 import { DatasetContext } from "../../../contexts/DatasetContext";
-import { Event, isEvent, isEventDTO } from "../../../types/apiTypes";
+import { Event, isEvent, isEventDTO } from "shared/types";
 import {
   BiRegularChevronDown,
   BiRegularChevronLeft,
@@ -31,7 +31,6 @@ export const DatasetEvents = () => {
       name: string;
     }[]
   >([]);
-  const [showChevron, setShowChevron] = createSignal(false);
 
   const getEvents = () => {
     const datasetId = datasetContext.dataset?.()?.id;
@@ -113,10 +112,6 @@ export const DatasetEvents = () => {
                       name: "File Upload Failed",
                     },
                     {
-                      id: "chunk_action_failed",
-                      name: "Chunk Upload Failed",
-                    },
-                    {
                       id: "chunks_uploaded",
                       name: "Chunks Uploaded",
                     },
@@ -125,12 +120,20 @@ export const DatasetEvents = () => {
                       name: "Chunk Updated",
                     },
                     {
+                      id: "bulk_chunks_deleted",
+                      name: "Bulk Chunks Deleted",
+                    },
+                    {
+                      id: "dataset_delete_failed",
+                      name: "Dataset Delete Failed",
+                    },
+                    {
                       id: "qdrant_index_failed",
                       name: "Qdrant Index Failed",
                     },
                     {
-                      id: "bulk_chunk_action_failed",
-                      name: "Bulk Chunk Action Failed",
+                      id: "bulk_chunk_upload_failed",
+                      name: "Bulk Chunk Upload Failed",
                     },
                   ]}
                   setSelected={(
@@ -192,9 +195,26 @@ export const DatasetEvents = () => {
                           {(event) => {
                             const [isExpanded, setIsExpanded] =
                               createSignal(false);
+                            const [showChevron, setShowChevron] =
+                              createSignal(false);
+
+                            let refEl: HTMLDivElement | null = null;
+
+                            createEffect(() => {
+                              if (refEl) {
+                                if (
+                                  refEl.scrollHeight > refEl.clientHeight ||
+                                  refEl.scrollWidth > refEl.clientWidth
+                                ) {
+                                  setShowChevron(true);
+                                } else {
+                                  setShowChevron(false);
+                                }
+                              }
+                            });
 
                             return (
-                              <tr class="max-h-3 even:bg-gray-50">
+                              <tr class="even:bg-gray-50">
                                 <td
                                   classList={{
                                     "whitespace-nowrap py-4 pl-4 pr-3 text-sm font-medium sm:pl-3":
@@ -224,18 +244,17 @@ export const DatasetEvents = () => {
                                     "whitespace-nowrap overflow-hidden overflow-ellipsis":
                                       !isExpanded(),
                                   }}
-                                  ref={(el) => {
-                                    if (
-                                      el.scrollHeight > el.clientHeight ||
-                                      el.scrollWidth > el.clientWidth
-                                    ) {
-                                      setShowChevron(true);
-                                    } else {
-                                      setShowChevron(false);
-                                    }
-                                  }}
                                 >
-                                  <div class="flex items-start overflow-hidden overflow-ellipsis break-words">
+                                  <div
+                                    classList={{
+                                      "flex items-start overflow-hidden overflow-ellipsis break-words":
+                                        true,
+                                      "max-h-10": !isExpanded(),
+                                    }}
+                                    ref={(el) => {
+                                      refEl = el;
+                                    }}
+                                  >
                                     <Show when={showChevron()}>
                                       <button
                                         onClick={() =>
@@ -250,7 +269,9 @@ export const DatasetEvents = () => {
                                         )}
                                       </button>
                                     </Show>
-                                    {JSON.stringify(event.event_data)}
+                                    {JSON.stringify(
+                                      JSON.parse(event.event_data),
+                                    )}
                                   </div>
                                 </td>
                               </tr>

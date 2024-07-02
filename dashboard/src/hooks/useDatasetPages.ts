@@ -1,5 +1,5 @@
 import { Accessor, createEffect, createMemo, createSignal } from "solid-js";
-import { DatasetAndUsage, Organization } from "../types/apiTypes";
+import { DatasetAndUsage, Organization } from "shared/types";
 import createFuzzySearch from "@nozbe/microfuzz";
 
 const FETCHING_SIZE = 100;
@@ -90,13 +90,19 @@ export const useDatasetPages = (props: {
     );
     return sliced;
   });
+
   const maxPageDiscovered = createMemo(() => {
     return Math.floor(realDatasets().length / PAGE_SIZE);
+  });
+
+  const maxDatasets = createMemo(() => {
+    return realDatasets().length;
   });
 
   return {
     datasets: currDatasets,
     maxPageDiscovered,
+    maxDatasets,
     removeDataset,
     hasLoaded,
   };

@@ -1,5 +1,5 @@
 {
-  "name": "arguflow-dashboard",
+  "name": "dashboard",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -16,6 +16,8 @@
     "@sentry/browser": "^7.110.0",
     "@solidjs/router": "^0.10.1",
     "papaparse": "^5.4.1",
+    "shared": "*",
+    "shiki": "^1.10.0",
     "solid-icons": "^1.1.0",
     "solid-js": "^1.8.11",
     "terracotta": "^1.0.3",
@@ -25,7 +27,7 @@
     "@tailwindcss/typography": "^0.5.10",
     "@types/papaparse": "^5.3.14",
     "@typescript-eslint/eslint-plugin": "^6.14.0",
-    "@typescript-eslint/parser": "^6.14.0",
+    "@typescript-eslint/parser": "7.14.1",
     "autoprefixer": "^10.4.16",
     "eslint": "^8.13.0",
     "eslint-config-prettier": "^9.1.0",
@@ -35,18 +37,13 @@
     "eslint-plugin-n": "^15.0.0",
     "eslint-plugin-prettier": "^5.0.1",
     "eslint-plugin-promise": "^6.0.0",
-    "eslint-plugin-solid": "^0.13.0",
+    "eslint-plugin-solid": "0.14.1",
     "postcss": "^8.4.32",
     "prettier": "3.1.1",
     "prettier-plugin-tailwindcss": "^0.5.11",
-    "rehype-pretty-code": "^0.12.5",
-    "remark-gfm": "^4.0.0",
-    "shiki": "^0.14.7",
-    "shikiji": "^0.9.0",
     "tailwindcss": "^3.3.6",
     "typescript": "^5.2.2",
     "vite": "^5.0.0",
-    "vite-plugin-solid": "^2.8.2",
-    "vite-plugin-solid-markdown": "^0.0.6"
+    "vite-plugin-solid": "^2.8.2"
   }
 }

@@ -1,4 +1,7 @@
-use super::search_operator::{assemble_qdrant_filter, SearchResult};
+use super::{
+    group_operator::get_groups_from_group_ids_query,
+    search_operator::{assemble_qdrant_filter, SearchResult},
+};
 use crate::{
     data::models::{ChunkMetadata, Pool, QdrantPayload, ServerDatasetConfiguration},
     errors::ServiceError,
@@ -14,9 +17,9 @@ use qdrant_client::{
         quantization_config::Quantization, BinaryQuantization, CountPoints, CreateCollection,
         Distance, FieldType, Filter, HnswConfigDiff, PayloadIndexParams, PointId, PointStruct,
         QuantizationConfig, RecommendPointGroups, RecommendPoints, RecommendStrategy,
-        SearchBatchPoints, SearchPointGroups, SearchPoints, SparseIndexConfig, SparseVectorConfig,
-        SparseVectorParams, TextIndexParams, TokenizerType, Value, Vector, VectorParams,
-        VectorParamsMap, VectorsConfig,
+        SearchBatchPoints, SearchParams, SearchPointGroups, SearchPoints, SparseIndexConfig,
+        SparseVectorConfig, SparseVectorParams, TextIndexParams, TokenizerType, Value, Vector,
+        VectorParams, VectorParamsMap, VectorsConfig,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -291,6 +294,17 @@ pub async fn create_new_qdrant_collection_query(
             )
             .await
             .map_err(|_| ServiceError::BadRequest("Failed to create index".into()))?;
+
+        qdrant_client
+            .create_field_index(
+                qdrant_collection.clone(),
+                "group_tag_set",
+                FieldType::Keyword,
+                None,
+                None,
+            )
+            .await
+            .map_err(|_| ServiceError::BadRequest("Failed to create index".into()))?;
     }
 
     Ok(())
@@ -328,7 +342,7 @@ pub async fn bulk_upsert_qdrant_points_query(
     Ok(())
 }
 
-#[tracing::instrument(skip(embedding_vector))]
+#[tracing::instrument(skip(embedding_vector, pool))]
 pub async fn create_new_qdrant_point_query(
     point_id: uuid::Uuid,
     embedding_vector: Vec<f32>,
@@ -336,8 +350,23 @@ pub async fn create_new_qdrant_point_query(
     splade_vector: Vec<(u32, f32)>,
     group_ids: Option<Vec<uuid::Uuid>>,
     config: ServerDatasetConfiguration,
+    pool: web::Data<Pool>,
 ) -> Result<(), ServiceError> {
-    let payload = QdrantPayload::new(chunk_metadata, group_ids, None).into();
+    let chunk_tags: Option<Vec<Option<String>>> = if let Some(ref group_ids) = group_ids {
+        Some(
+            get_groups_from_group_ids_query(group_ids.clone(), pool.clone())
+                .await?
+                .iter()
+                .filter_map(|group| group.tag_set.clone())
+                .flatten()
+                .dedup()
+                .collect(),
+        )
+    } else {
+        None
+    };
+
+    let payload = QdrantPayload::new(chunk_metadata, group_ids, None, chunk_tags).into();
     let qdrant_collection = format!("{}_vectors", config.EMBEDDING_SIZE);
 
     let vector_name = match embedding_vector.len() {
@@ -379,7 +408,8 @@ pub async fn create_new_qdrant_point_query(
     Ok(())
 }
 
-#[tracing::instrument(skip(updated_vector))]
+#[allow(clippy::too_many_arguments)]
+#[tracing::instrument(skip(updated_vector, web_pool))]
 pub async fn update_qdrant_point_query(
     metadata: Option<ChunkMetadata>,
     point_id: uuid::Uuid,
@@ -388,6 +418,7 @@ pub async fn update_qdrant_point_query(
     dataset_id: uuid::Uuid,
     splade_vector: Vec<(u32, f32)>,
     config: ServerDatasetConfiguration,
+    web_pool: web::Data<Pool>,
 ) -> Result<(), actix_web::Error> {
     let qdrant_point_id: Vec<PointId> = vec![point_id.to_string().into()];
 
@@ -415,7 +446,7 @@ pub async fn update_qdrant_point_query(
     let current_point = current_point_vec.first();
 
     let payload = if let Some(metadata) = metadata.clone() {
-        let group_ids = if let Some(group_ids) = group_ids {
+        let group_ids = if let Some(group_ids) = group_ids.clone() {
             group_ids
         } else if let Some(current_point) = current_point {
             current_point
@@ -435,7 +466,20 @@ pub async fn update_qdrant_point_query(
             vec![]
         };
 
-        QdrantPayload::new(metadata, group_ids.into(), Some(dataset_id))
+        let chunk_tags: Vec<Option<String>> =
+            get_groups_from_group_ids_query(group_ids.clone(), web_pool.clone())
+                .await?
+                .iter()
+                .filter_map(|group| group.tag_set.clone())
+                .flatten()
+                .collect();
+
+        QdrantPayload::new(
+            metadata,
+            group_ids.into(),
+            Some(dataset_id),
+            Some(chunk_tags),
+        )
     } else if let Some(current_point) = current_point {
         QdrantPayload::from(current_point.clone())
     } else {
@@ -534,7 +578,7 @@ pub async fn add_bookmark_to_qdrant_query(
             .get("group_ids")
             .unwrap_or(&Value::from(vec![] as Vec<&str>))
             .iter_list()
-            .unwrap()
+            .unwrap_or(Value::from(vec![] as Vec<&str>).iter_list().unwrap())
             .map(|id| {
                 id.as_str()
                     .unwrap_or(&"".to_owned())
@@ -718,6 +762,11 @@ pub async fn search_over_groups_query(
                     group_by: "group_ids".to_string(),
                     group_size: if group_size == 0 { 1 } else { group_size },
                     timeout: Some(60),
+                    params: Some(SearchParams {
+                        exact: Some(false),
+                        indexed_only: Some(config.INDEXED_ONLY),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 })
                 .await
@@ -738,6 +787,11 @@ pub async fn search_over_groups_query(
                     group_by: "group_ids".to_string(),
                     group_size: if group_size == 0 { 1 } else { group_size },
                     timeout: Some(60),
+                    params: Some(SearchParams {
+                        exact: Some(false),
+                        indexed_only: Some(config.INDEXED_ONLY),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 })
                 .await
@@ -796,6 +850,10 @@ pub async fn search_qdrant_query(
     config: ServerDatasetConfiguration,
     get_total_pages: bool,
 ) -> Result<(Vec<SearchResult>, u64, Vec<usize>), ServiceError> {
+    if limit == 0 {
+        return Ok((vec![], 0, vec![]));
+    }
+
     let qdrant_collection = format!("{}_vectors", config.EMBEDDING_SIZE);
 
     let qdrant_client = get_qdrant_connection(
@@ -816,7 +874,7 @@ pub async fn search_qdrant_query(
                     vector_name: Some("sparse_vectors".to_string()),
                     limit,
                     score_threshold: query.score_threshold,
-                    offset: Some((page - 1) * 10),
+                    offset: Some((page - 1) * limit),
                     with_payload: None,
                     filter: Some(query.filter.clone()),
                     timeout: Some(60),
@@ -845,11 +903,15 @@ pub async fn search_qdrant_query(
                     vector_name: Some(vector_name.to_string()),
                     limit,
                     score_threshold: query.score_threshold,
-                    offset: Some((page - 1) * 10),
+                    offset: Some((page - 1) * limit),
                     with_payload: None,
                     filter: Some(query.filter.clone()),
                     timeout: Some(60),
-                    params: None,
+                    params: Some(SearchParams {
+                        exact: Some(false),
+                        indexed_only: Some(config.INDEXED_ONLY),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 })
             }
@@ -1027,7 +1089,11 @@ pub async fn recommend_qdrant_query(
         filter: Some(filter),
         limit,
         with_payload: None,
-        params: None,
+        params: Some(SearchParams {
+            exact: Some(false),
+            indexed_only: Some(config.INDEXED_ONLY),
+            ..Default::default()
+        }),
         score_threshold: None,
         offset: None,
         using: Some(vector_name.to_string()),
@@ -1153,7 +1219,11 @@ pub async fn recommend_qdrant_groups_query(
         filter: Some(filters),
         limit: limit.try_into().unwrap_or(10),
         with_payload: None,
-        params: None,
+        params: Some(SearchParams {
+            exact: Some(false),
+            indexed_only: Some(config.INDEXED_ONLY),
+            ..Default::default()
+        }),
         score_threshold: None,
         using: Some(vector_name.to_string()),
         with_vectors: None,
@@ -1228,7 +1298,7 @@ pub async fn recommend_qdrant_groups_query(
 #[tracing::instrument]
 pub async fn get_point_count_qdrant_query(
     filters: Filter,
-    config: ServerDatasetConfiguration,
+    config: &ServerDatasetConfiguration,
     get_total_pages: bool,
 ) -> Result<u64, ServiceError> {
     if !get_total_pages {
@@ -1291,4 +1361,29 @@ pub async fn point_ids_exists_in_qdrant(
         })?;
 
     Ok(data.result.len() == point_ids.len())
+}
+
+pub async fn delete_points_from_qdrant(
+    point_ids: Vec<uuid::Uuid>,
+    config: ServerDatasetConfiguration,
+) -> Result<(), ServiceError> {
+    let qdrant_collection = format!("{}_vectors", config.EMBEDDING_SIZE);
+
+    let qdrant_client = get_qdrant_connection(
+        Some(get_env!("QDRANT_URL", "QDRANT_URL should be set")),
+        Some(get_env!("QDRANT_API_KEY", "QDRANT_API_KEY should be set")),
+    )
+    .await?;
+
+    let points: Vec<PointId> = point_ids.iter().map(|x| x.to_string().into()).collect();
+
+    qdrant_client
+        .delete_points(qdrant_collection, None, &points.into(), None)
+        .await
+        .map_err(|err| {
+            log::info!("Failed to delete points from qdrant {:?}", err);
+            ServiceError::BadRequest("Failed to delete points from qdrant".to_string())
+        })?;
+
+    Ok(())
 }

@@ -1,13 +1,15 @@
 use super::auth_handler::AdminOnly;
 use crate::{
-    af_middleware::auth_middleware::verify_admin,
     data::models::{Invitation, Pool, RedisPool},
     errors::ServiceError,
+    middleware::auth_middleware::verify_admin,
     operators::{
         invitation_operator::{
             create_invitation_query, delete_invitation_by_id_query, get_invitation_by_id_query,
             get_invitations_for_organization_query, send_invitation,
+            send_invitation_for_existing_user,
         },
+        organization_operator::get_org_from_id_query,
         user_operator::add_existing_user_to_org,
     },
 };
@@ -73,6 +75,12 @@ pub async fn post_invitation(
         return Err(ServiceError::BadRequest("Invalid email".to_string()));
     }
 
+    if user.0.email == email {
+        return Err(ServiceError::BadRequest(
+            "Can not invite yourself".to_string(),
+        ));
+    }
+
     let org_role = user
         .0
         .user_orgs
@@ -87,7 +95,7 @@ pub async fn post_invitation(
 
     let existing_user_org_id = invitation_data.organization_id;
     let existing_user_role = invitation_data.user_role;
-
+    let organization = get_org_from_id_query(invitation_data.organization_id, pool.clone()).await?;
     let added_user_to_org = add_existing_user_to_org(
         email.clone(),
         existing_user_org_id,
@@ -98,6 +106,7 @@ pub async fn post_invitation(
     .await?;
 
     if added_user_to_org {
+        send_invitation_for_existing_user(email.clone(), organization.organization.name).await?;
         return Ok(HttpResponse::NoContent().finish());
     }
 
@@ -111,7 +120,12 @@ pub async fn post_invitation(
     )
     .await?;
 
-    send_invitation(invitation.registration_url, invitation.invitation).await?;
+    send_invitation(
+        invitation.registration_url,
+        invitation.invitation,
+        organization.organization.name,
+    )
+    .await?;
 
     Ok(HttpResponse::NoContent().finish())
 }

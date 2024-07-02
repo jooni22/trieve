@@ -143,7 +143,7 @@ export const Sidebar = (props: SidebarProps) => {
               <span class="text-xl">
                 <BiRegularPlus class="fill-current" />
               </span>
-              <span>RAG Chat</span>
+              <span>RAG Playground</span>
             </div>
           </button>
         </div>
@@ -269,7 +269,6 @@ export const Sidebar = (props: SidebarProps) => {
               </div>
               <div class="align-top text-lg">
                 <span>Trieve</span>
-                <span class="text-magenta">Chat</span>\
               </div>
             </div>
           </a>

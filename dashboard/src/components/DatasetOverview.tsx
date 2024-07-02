@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unsafe-member-access */
 import { TbDatabasePlus } from "solid-icons/tb";
 import {
   Show,
@@ -17,7 +18,9 @@ import {
   AiOutlineClear,
 } from "solid-icons/ai";
 import { formatDate } from "../formatters";
-import { Organization } from "../types/apiTypes";
+import { TbReload } from "solid-icons/tb";
+import { createToast } from "./ShowToasts";
+import { DefaultError, Organization } from "shared/types";
 
 export interface DatasetOverviewProps {
   setOpenNewDatasetModal: Setter<boolean>;
@@ -28,47 +31,99 @@ export const DatasetOverview = (props: DatasetOverviewProps) => {
   const navigate = useNavigate();
   const [page, setPage] = createSignal(0);
   const [datasetSearchQuery, setDatasetSearchQuery] = createSignal("");
-  const [maxDatasetsLength, setMaxDatasetsLength] = createSignal(0);
-
-  const { datasets, maxPageDiscovered, removeDataset, hasLoaded } =
+  const [usage, setUsage] = createSignal<
+    Record<string, { chunk_count: number }>
+  >({});
+  const { datasets, maxPageDiscovered, maxDatasets, removeDataset, hasLoaded } =
     useDatasetPages({
+      // eslint-disable-next-line solid/reactivity
       org: props.selectedOrganization,
       searchQuery: datasetSearchQuery,
       page: page,
       setPage,
     });
 
-  createEffect((prevLength: number) => {
-    const datasetsLength = datasets().length;
-    if (datasetsLength > prevLength) {
-      setMaxDatasetsLength(datasetsLength);
-    }
+  createEffect(() => {
+    const api_host = import.meta.env.VITE_API_HOST as unknown as string;
+    const newUsage: Record<string, { chunk_count: number }> = {};
 
-    return prevLength > datasetsLength ? prevLength : datasetsLength;
-  }, 0);
+    const fetchUsage = (datasetId: string) => {
+      return new Promise((resolve, reject) => {
+        fetch(`${api_host}/dataset/usage/${datasetId}`, {
+          method: "GET",
+          headers: {
+            "TR-Dataset": datasetId,
+            "Content-Type": "application/json",
+          },
+          credentials: "include",
+        })
+          .then((response) => {
+            if (!response.ok) {
+              reject(new Error("Failed to fetch dataset usage"));
+            }
+            return response.json();
+          })
+          .then((data) => {
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+            newUsage[datasetId] = data;
+            resolve(data);
+          })
+          .catch((error) => {
+            console.error(
+              `Failed to fetch usage for dataset ${datasetId}:`,
+              error,
+            );
+            reject(error);
+          });
+      });
+    };
+
+    const fetchInitialUsage = () => {
+      const promises = datasets().map((dataset) =>
+        fetchUsage(dataset.dataset.id),
+      );
+      Promise.all(promises)
+        .then(() => {
+          setUsage(newUsage);
+        })
+        .catch((error) => {
+          console.error("Failed to fetch initial usage: ", error);
+        });
+    };
+
+    fetchInitialUsage();
+  });
 
   createEffect(() => {
     props.selectedOrganization();
     setPage(0);
   });
 
-  const deleteDataset = (datasetId: string) => {
+  const deleteDataset = async (datasetId: string) => {
     const api_host = import.meta.env.VITE_API_HOST as unknown as string;
-    void fetch(`${api_host}/dataset/${datasetId}`, {
+    const response = await fetch(`${api_host}/dataset/${datasetId}`, {
       method: "DELETE",
       headers: {
         "TR-Dataset": datasetId,
         "Content-Type": "application/json",
       },
       credentials: "include",
-    }).then(() => {
-      removeDataset(datasetId);
     });
+    if (response.ok) {
+      removeDataset(datasetId);
+    } else {
+      const error = (await response.json()) as DefaultError;
+      createToast({
+        title: "Error",
+        type: "error",
+        message: `Failed to delete dataset: ${error.message}`,
+      });
+    }
   };
 
-  const clearDataset = (datasetId: string) => {
+  const clearDataset = async (datasetId: string) => {
     const api_host = import.meta.env.VITE_API_HOST as unknown as string;
-    void fetch(`${api_host}/dataset/clear/${datasetId}`, {
+    const response = await fetch(`${api_host}/dataset/clear/${datasetId}`, {
       method: "PUT",
       headers: {
         "TR-Dataset": datasetId,
@@ -76,6 +131,73 @@ export const DatasetOverview = (props: DatasetOverviewProps) => {
       },
       credentials: "include",
     });
+
+    if (!response.ok) {
+      const error = (await response.json()) as DefaultError;
+      createToast({
+        title: "Error",
+        type: "error",
+        message: `Failed to clear dataset: ${error.message}`,
+      });
+    }
+  };
+
+  const reloadChunkCount = (datasetId: string) => {
+    const api_host = import.meta.env.VITE_API_HOST as unknown as string;
+    if (!datasetId) {
+      console.error("Dataset ID is undefined.");
+      return;
+    }
+
+    const currentUsage = usage();
+
+    fetch(`${api_host}/dataset/usage/${datasetId}`, {
+      method: "GET",
+      headers: {
+        "TR-Dataset": datasetId,
+        "Content-Type": "application/json",
+      },
+      credentials: "include",
+    })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error("Failed to fetch dataset usage");
+        }
+        return response.json();
+      })
+      .then((newData) => {
+        const prevCount = currentUsage[datasetId]?.chunk_count || 0;
+        const newCount: number = newData.chunk_count as number;
+        const countDifference = newCount - prevCount;
+
+        setUsage((prevUsage) => ({
+          ...prevUsage,
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+          [datasetId]: newData,
+        }));
+
+        createToast({
+          title: "Updated",
+          type: "success",
+          message: `Successfully updated chunk count: ${countDifference} chunk${
+            Math.abs(countDifference) === 1 ? " has" : "s have"
+          } been ${
+            countDifference > 0
+              ? "added"
+              : countDifference < 0
+                ? "removed"
+                : "added or removed"
+          } since last update.`,
+          timeout: 3000,
+        });
+      })
+      .catch((error) => {
+        createToast({
+          title: "Error",
+          type: "error",
+          message: `Failed to reload chunk count: ${error}`,
+        });
+      });
   };
 
   return (
@@ -86,7 +208,7 @@ export const DatasetOverview = (props: DatasetOverviewProps) => {
             <h1 class="text-base font-semibold leading-6">Datasets</h1>
             <Show
               fallback={
-                maxDatasetsLength() > 0 ? (
+                maxDatasets() > 0 ? (
                   <p class="text-sm text-red-700">
                     No datasets match your search query.
                   </p>
@@ -114,7 +236,7 @@ export const DatasetOverview = (props: DatasetOverviewProps) => {
               placeholder="Search datasets..."
               class="rounded border border-neutral-300/80 bg-white px-2 py-1 text-sm placeholder:text-neutral-400"
             />
-            <Show when={maxDatasetsLength() != 0}>
+            <Show when={maxDatasets() != 0}>
               <button
                 class="rounded bg-magenta-500 px-3 py-2 text-sm font-semibold text-white"
                 onClick={() => props.setOpenNewDatasetModal(true)}
@@ -125,7 +247,7 @@ export const DatasetOverview = (props: DatasetOverviewProps) => {
           </div>
         </div>
       </div>
-      <Show when={maxDatasetsLength() === 0 && page() === 0 && hasLoaded}>
+      <Show when={maxDatasets() === 0 && page() === 0 && hasLoaded}>
         <button
           onClick={() => props.setOpenNewDatasetModal(true)}
           class="relative block w-full rounded-lg border-2 border-dashed border-neutral-300 p-12 text-center hover:border-neutral-400 focus:outline-none focus:ring-2 focus:ring-magenta-500 focus:ring-offset-2"
@@ -134,7 +256,7 @@ export const DatasetOverview = (props: DatasetOverviewProps) => {
           <span class="mt-2 block font-semibold">Create A New Dataset</span>
         </button>
       </Show>
-      <Show when={maxDatasetsLength() > 0}>
+      <Show when={maxDatasets() > 0}>
         <div class="mt-8">
           <div class="overflow-hidden rounded shadow ring-1 ring-black ring-opacity-5">
             <table class="min-w-full divide-y divide-neutral-300">
@@ -190,7 +312,22 @@ export const DatasetOverview = (props: DatasetOverviewProps) => {
                           );
                         }}
                       >
-                        {datasetAndUsage.dataset_usage.chunk_count}
+                        <span class="inline-flex items-center">
+                          <div>
+                            {usage()[datasetAndUsage.dataset.id]?.chunk_count ??
+                              datasetAndUsage.dataset_usage.chunk_count}{" "}
+                          </div>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              e.preventDefault();
+                              reloadChunkCount(datasetAndUsage.dataset.id);
+                            }}
+                            class="ml-2 hover:text-fuchsia-500"
+                          >
+                            <TbReload />
+                          </button>
+                        </span>
                       </td>
                       <td
                         class="hidden whitespace-nowrap px-3 py-4 text-sm text-neutral-600 lg:block"
@@ -223,7 +360,7 @@ export const DatasetOverview = (props: DatasetOverviewProps) => {
                           onClick={() => {
                             confirm(
                               "Are you sure you want to delete this dataset?",
-                            ) && deleteDataset(datasetAndUsage.dataset.id);
+                            ) && void deleteDataset(datasetAndUsage.dataset.id);
                           }}
                         >
                           <FiTrash />
@@ -233,7 +370,7 @@ export const DatasetOverview = (props: DatasetOverviewProps) => {
                           onClick={() => {
                             confirm(
                               "Are you sure you want to clear this dataset?",
-                            ) && clearDataset(datasetAndUsage.dataset.id);
+                            ) && void clearDataset(datasetAndUsage.dataset.id);
                           }}
                         >
                           <AiOutlineClear />

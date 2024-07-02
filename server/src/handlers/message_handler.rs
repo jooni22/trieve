@@ -1,49 +1,78 @@
 use super::{
     auth_handler::{AdminOnly, LoggedUser},
-    chunk_handler::{
-        check_completion_param_validity, ChunkFilter, ParsedQuery, SearchChunksReqPayload,
-    },
+    chunk_handler::{ChunkFilter, ParsedQuery, SearchChunksReqPayload},
 };
 use crate::{
     data::models::{
-        self, ChunkMetadataStringTagSet, ChunkMetadataTypes, Dataset, DatasetAndOrgWithSubAndPlan,
-        Pool, ServerDatasetConfiguration,
+        self, ChunkMetadataTypes, DatasetAndOrgWithSubAndPlan, Pool, ServerDatasetConfiguration,
     },
     errors::ServiceError,
     get_env,
     operators::{
         message_operator::{
-            create_message_query, create_topic_message_query, delete_message_query,
-            get_message_by_sort_for_topic_query, get_messages_for_topic_query, get_topic_messages,
+            create_topic_message_query, delete_message_query, get_message_by_sort_for_topic_query,
+            get_messages_for_topic_query, get_topic_messages, stream_response,
         },
         organization_operator::get_message_org_count,
         parse_operator::convert_html_to_text,
         search_operator::search_hybrid_chunks,
     },
 };
-use actix::Arbiter;
-use actix_web::{
-    web::{self, Bytes},
-    HttpResponse,
-};
-use crossbeam_channel::unbounded;
-use futures_util::stream;
+use actix_web::{web, HttpResponse};
+
 use itertools::Itertools;
 use openai_dive::v1::{
     api::Client,
-    resources::{
-        chat::{
-            ChatCompletionChoice, ChatCompletionParameters, ChatMessage, ChatMessageContent, Role,
-        },
-        shared::StopToken,
+    resources::chat::{
+        ChatCompletionChoice, ChatCompletionParameters, ChatMessage, ChatMessageContent, Role,
     },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use simple_server_timing_header::Timer;
 use simsearch::SimSearch;
-use tokio_stream::StreamExt;
 use utoipa::ToSchema;
+
+pub fn check_completion_param_validity(
+    temperature: Option<f32>,
+    frequency_penalty: Option<f32>,
+    presence_penalty: Option<f32>,
+    stop_tokens: Option<Vec<String>>,
+) -> Result<(), ServiceError> {
+    if let Some(temperature) = temperature {
+        if !(0.0..=2.0).contains(&temperature) {
+            return Err(ServiceError::BadRequest(
+                "Temperature must be between 0 and 2".to_string(),
+            ));
+        }
+    }
+
+    if let Some(frequency_penalty) = frequency_penalty {
+        if !(-2.0..=2.0).contains(&frequency_penalty) {
+            return Err(ServiceError::BadRequest(
+                "Frequency penalty must be between -2.0 and 2.0".to_string(),
+            ));
+        }
+    }
+
+    if let Some(presence_penalty) = presence_penalty {
+        if !(-2.0..=2.0).contains(&presence_penalty) {
+            return Err(ServiceError::BadRequest(
+                "Presence penalty must be between -2.0 and 2.0".to_string(),
+            ));
+        }
+    }
+
+    if let Some(stop_tokens) = stop_tokens {
+        if stop_tokens.len() > 4 {
+            return Err(ServiceError::BadRequest(
+                "Stop tokens must be less than or equal to 4".to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
 
 #[derive(Deserialize, Serialize, Debug, ToSchema)]
 pub struct CreateMessageReqPayload {
@@ -57,6 +86,12 @@ pub struct CreateMessageReqPayload {
     pub highlight_delimiters: Option<Vec<String>>,
     /// Search_type can be either "semantic", "fulltext", or "hybrid". "hybrid" will pull in one page (10 chunks) of both semantic and full-text results then re-rank them using BAAI/bge-reranker-large. "semantic" will pull in one page (10 chunks) of the nearest cosine distant vectors. "fulltext" will pull in one page (10 chunks) of full-text results based on SPLADE. Default is "hybrid".
     pub search_type: Option<String>,
+    /// If concat user messages query is set to true, all of the user messages in the topic will be concatenated together and used as the search query. If not specified, this defaults to false. Default is false.
+    pub concat_user_messages_query: Option<bool>,
+    /// Query is the search query. This can be any string. The search_query will be used to create a dense embedding vector and/or sparse vector which will be used to find the result set. If not specified, will default to the last user message or HyDE if HyDE is enabled in the dataset configuration. Default is None.
+    pub search_query: Option<String>,
+    /// Page size is the number of chunks to fetch during RAG. If 0, then no search will be performed. If specified, this will override the N retrievals to include in the dataset configuration. Default is None.
+    pub page_size: Option<u64>,
     /// Filters is a JSON object which can be used to filter chunks. This is useful for when you want to filter chunks by arbitrary metadata. Unlike with tag filtering, there is a performance hit for filtering on metadata.
     pub filters: Option<ChunkFilter>,
     /// Completion first decides whether the stream should contain the stream of the completion response or the chunks first. Default is false. Keep in mind that || is used to separate the chunks from the completion response. If || is in the completion then you may want to split on ||{ instead.
@@ -77,7 +112,7 @@ pub struct CreateMessageReqPayload {
 
 /// Create message
 ///
-/// Create message. Messages are attached to topics in order to coordinate memory of gen-AI chat sessions. We are considering refactoring this resource of the API soon. Currently, you can only send user messages. If the topic is a RAG topic then the response will include Chunks first on the stream. The structure will look like `[chunks]||mesage`. See docs.trieve.ai for more information. Auth'ed user or api key must have an admin or owner role for the specified dataset's organization.
+/// Create message. Messages are attached to topics in order to coordinate memory of gen-AI chat sessions.Auth'ed user or api key must have an admin or owner role for the specified dataset's organization.
 #[utoipa::path(
     post,
     path = "/message",
@@ -137,7 +172,7 @@ pub async fn create_message(
     let topic_id = create_message_data.topic_id;
 
     let new_message = models::Message::from_details(
-        create_message_data.new_message_content,
+        create_message_data.new_message_content.clone(),
         topic_id,
         0,
         "user".to_string(),
@@ -183,20 +218,10 @@ pub async fn create_message(
     stream_response(
         previous_messages,
         topic_id,
-        create_message_data.stream_response,
-        create_message_data.highlight_results,
-        create_message_data.highlight_delimiters,
-        create_message_data.search_type,
-        create_message_data.filters,
         dataset_org_plan_sub.dataset,
         stream_response_pool,
         server_dataset_configuration,
-        create_message_data.completion_first,
-        create_message_data.temperature,
-        create_message_data.frequency_penalty,
-        create_message_data.presence_penalty,
-        create_message_data.max_tokens,
-        create_message_data.stop_tokens,
+        create_message_data,
     )
     .await
 }
@@ -246,6 +271,12 @@ pub struct RegenerateMessageReqPayload {
     pub highlight_delimiters: Option<Vec<String>>,
     /// Search_type can be either "semantic", "fulltext", or "hybrid". "hybrid" will pull in one page (10 chunks) of both semantic and full-text results then re-rank them using BAAI/bge-reranker-large. "semantic" will pull in one page (10 chunks) of the nearest cosine distant vectors. "fulltext" will pull in one page (10 chunks) of full-text results based on SPLADE.
     pub search_type: Option<String>,
+    /// If concat user messages query is set to true, all of the user messages in the topic will be concatenated together and used as the search query. If not specified, this defaults to false. Default is false.
+    pub concat_user_messages_query: Option<bool>,
+    /// Query is the search query. This can be any string. The search_query will be used to create a dense embedding vector and/or sparse vector which will be used to find the result set. If not specified, will default to the last user message or HyDE if HyDE is enabled in the dataset configuration. Default is None.
+    pub search_query: Option<String>,
+    /// Page size is the number of chunks to fetch during RAG. If 0, then no search will be performed. If specified, this will override the N retrievals to include in the dataset configuration. Default is None.
+    pub page_size: Option<u64>,
     /// Filters is a JSON object which can be used to filter chunks. This is useful for when you want to filter chunks by arbitrary metadata. Unlike with tag filtering, there is a performance hit for filtering on metadata.
     pub filters: Option<ChunkFilter>,
     /// Completion first decides whether the stream should contain the stream of the completion response or the chunks first. Default is false. Keep in mind that || is used to separate the chunks from the completion response. If || is in the completion then you may want to split on ||{ instead.
@@ -278,6 +309,12 @@ pub struct EditMessageReqPayload {
     pub highlight_delimiters: Option<Vec<String>>,
     /// Search_type can be either "semantic", "fulltext", or "hybrid". "hybrid" will pull in one page (10 chunks) of both semantic and full-text results then re-rank them using BAAI/bge-reranker-large. "semantic" will pull in one page (10 chunks) of the nearest cosine distant vectors. "fulltext" will pull in one page (10 chunks) of full-text results based on SPLADE.
     pub search_type: Option<String>,
+    /// If concat user messages query is set to true, all of the user messages in the topic will be concatenated together and used as the search query. If not specified, this defaults to false. Default is false.
+    pub concat_user_messages_query: Option<bool>,
+    /// Query is the search query. This can be any string. The search_query will be used to create a dense embedding vector and/or sparse vector which will be used to find the result set. If not specified, will default to the last user message or HyDE if HyDE is enabled in the dataset configuration. Default is None.
+    pub search_query: Option<String>,
+    /// Page size is the number of chunks to fetch during RAG. If 0, then no search will be performed. If specified, this will override the N retrievals to include in the dataset configuration. Default is None.
+    pub page_size: Option<u64>,
     /// Filters is a JSON object which can be used to filter chunks. This is useful for when you want to filter chunks by arbitrary metadata. Unlike with tag filtering, there is a performance hit for filtering on metadata.
     pub filters: Option<ChunkFilter>,
     /// Completion first decides whether the stream should contain the stream of the completion response or the chunks first. Default is false. Keep in mind that || is used to separate the chunks from the completion response. If || is in the completion then you may want to split on ||{ instead.
@@ -294,6 +331,52 @@ pub struct EditMessageReqPayload {
     pub max_tokens: Option<u32>,
     /// Stop tokens are up to 4 sequences where the API will stop generating further tokens.
     pub stop_tokens: Option<Vec<String>>,
+}
+
+impl From<EditMessageReqPayload> for CreateMessageReqPayload {
+    fn from(data: EditMessageReqPayload) -> Self {
+        CreateMessageReqPayload {
+            new_message_content: data.new_message_content,
+            topic_id: data.topic_id,
+            highlight_results: data.highlight_citations,
+            highlight_delimiters: data.highlight_delimiters,
+            search_type: data.search_type,
+            concat_user_messages_query: data.concat_user_messages_query,
+            search_query: data.search_query,
+            page_size: data.page_size,
+            filters: data.filters,
+            completion_first: data.completion_first,
+            stream_response: data.stream_response,
+            temperature: data.temperature,
+            frequency_penalty: data.frequency_penalty,
+            presence_penalty: data.presence_penalty,
+            max_tokens: data.max_tokens,
+            stop_tokens: data.stop_tokens,
+        }
+    }
+}
+
+impl From<RegenerateMessageReqPayload> for CreateMessageReqPayload {
+    fn from(data: RegenerateMessageReqPayload) -> Self {
+        CreateMessageReqPayload {
+            new_message_content: "".to_string(),
+            topic_id: data.topic_id,
+            highlight_results: data.highlight_citations,
+            highlight_delimiters: data.highlight_delimiters,
+            search_type: data.search_type,
+            concat_user_messages_query: data.concat_user_messages_query,
+            search_query: data.search_query,
+            page_size: data.page_size,
+            filters: data.filters,
+            completion_first: data.completion_first,
+            stream_response: data.stream_response,
+            temperature: data.temperature,
+            frequency_penalty: data.frequency_penalty,
+            presence_penalty: data.presence_penalty,
+            max_tokens: data.max_tokens,
+            stop_tokens: data.stop_tokens,
+        }
+    }
 }
 
 /// Edit message
@@ -324,9 +407,7 @@ pub async fn edit_message(
     pool: web::Data<Pool>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let topic_id: uuid::Uuid = data.topic_id;
-    let stream_response = data.stream_response;
     let message_sort_order = data.message_sort_order;
-    let new_message_content = &data.new_message_content;
 
     check_completion_param_validity(
         data.temperature,
@@ -356,21 +437,7 @@ pub async fn edit_message(
     .await?;
 
     create_message(
-        actix_web::web::Json(CreateMessageReqPayload {
-            new_message_content: new_message_content.to_string(),
-            topic_id,
-            stream_response,
-            highlight_results: data.highlight_citations,
-            highlight_delimiters: data.highlight_delimiters.clone(),
-            search_type: data.search_type.clone(),
-            filters: data.filters.clone(),
-            completion_first: data.completion_first,
-            temperature: data.temperature,
-            frequency_penalty: data.frequency_penalty,
-            presence_penalty: data.presence_penalty,
-            max_tokens: data.max_tokens,
-            stop_tokens: data.stop_tokens.clone(),
-        }),
+        actix_web::web::Json(data.into_inner().into()),
         user,
         dataset_org_plan_sub,
         third_pool,
@@ -407,7 +474,6 @@ pub async fn regenerate_message(
     pool: web::Data<Pool>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let topic_id = data.topic_id;
-    let should_stream = data.stream_response;
     let server_dataset_configuration = ServerDatasetConfiguration::from_json(
         dataset_org_plan_sub.dataset.server_configuration.clone(),
     );
@@ -436,20 +502,10 @@ pub async fn regenerate_message(
         return stream_response(
             previous_messages,
             topic_id,
-            should_stream,
-            data.highlight_citations,
-            data.highlight_delimiters.clone(),
-            data.search_type.clone(),
-            data.filters.clone(),
             dataset_org_plan_sub.dataset,
             create_message_pool,
             server_dataset_configuration,
-            data.completion_first,
-            data.temperature,
-            data.frequency_penalty,
-            data.presence_penalty,
-            data.max_tokens,
-            data.stop_tokens.clone(),
+            data.into_inner().into(),
         )
         .await;
     }
@@ -494,450 +550,17 @@ pub async fn regenerate_message(
         previous_messages_to_regenerate.push(message.clone());
     }
 
-    let _ = delete_message_query(message_id, topic_id, dataset_id, &pool).await;
+    delete_message_query(message_id, topic_id, dataset_id, &pool).await?;
 
     stream_response(
         previous_messages_to_regenerate,
         topic_id,
-        should_stream,
-        data.highlight_citations,
-        data.highlight_delimiters.clone(),
-        data.search_type.clone(),
-        data.filters.clone(),
         dataset_org_plan_sub.dataset,
         create_message_pool,
         server_dataset_configuration,
-        data.completion_first,
-        data.temperature,
-        data.frequency_penalty,
-        data.presence_penalty,
-        data.max_tokens,
-        data.stop_tokens.clone(),
+        data.into_inner().into(),
     )
     .await
-}
-
-#[tracing::instrument]
-pub async fn get_topic_string(
-    model: String,
-    first_message: String,
-    dataset: &Dataset,
-) -> Result<String, ServiceError> {
-    let prompt_topic_message = ChatMessage {
-        role: Role::User,
-        content: ChatMessageContent::Text(format!(
-            "Write a 2-3 word topic name from the following prompt: {}",
-            first_message
-        )),
-        tool_calls: None,
-        name: None,
-        tool_call_id: None,
-    };
-    let parameters = ChatCompletionParameters {
-        model,
-        messages: vec![prompt_topic_message],
-        stream: Some(false),
-        temperature: None,
-        top_p: None,
-        n: None,
-        stop: None,
-        max_tokens: None,
-        presence_penalty: Some(0.8),
-        frequency_penalty: Some(0.8),
-        logit_bias: None,
-        user: None,
-        response_format: None,
-        tools: None,
-        tool_choice: None,
-        logprobs: None,
-        top_logprobs: None,
-        seed: None,
-    };
-
-    let dataset_config =
-        ServerDatasetConfiguration::from_json(dataset.server_configuration.clone());
-    let base_url = dataset_config.LLM_BASE_URL;
-
-    let base_url = if base_url.is_empty() {
-        "https://openrouter.ai/api/v1".into()
-    } else {
-        base_url
-    };
-
-    let llm_api_key = if base_url.contains("openai.com") {
-        get_env!("OPENAI_API_KEY", "OPENAI_API_KEY for openai should be set").into()
-    } else {
-        get_env!(
-            "LLM_API_KEY",
-            "LLM_API_KEY for openrouter or self-hosted should be set"
-        )
-        .into()
-    };
-
-    let client = Client {
-        api_key: llm_api_key,
-        http_client: reqwest::Client::new(),
-        base_url,
-        organization: None,
-    };
-
-    let query = client
-        .chat()
-        .create(parameters)
-        .await
-        .map_err(|_| ServiceError::BadRequest("No OpenAI Completion for topic".to_string()))?;
-
-    let topic = match &query
-        .choices
-        .first()
-        .ok_or(ServiceError::BadRequest(
-            "No response for OpenAI completion".to_string(),
-        ))?
-        .message
-        .content
-    {
-        ChatMessageContent::Text(topic) => topic.clone(),
-        _ => "".to_string(),
-    };
-
-    Ok(topic)
-}
-
-#[allow(clippy::too_many_arguments)]
-#[tracing::instrument(skip(pool))]
-pub async fn stream_response(
-    messages: Vec<models::Message>,
-    topic_id: uuid::Uuid,
-    should_stream: Option<bool>,
-    highlight_results: Option<bool>,
-    highlight_delimiters: Option<Vec<String>>,
-    search_type: Option<String>,
-    filters: Option<ChunkFilter>,
-    dataset: Dataset,
-    pool: web::Data<Pool>,
-    config: ServerDatasetConfiguration,
-    completion_first: Option<bool>,
-    temperature: Option<f32>,
-    frequency_penalty: Option<f32>,
-    presence_penalty: Option<f32>,
-    max_tokens: Option<u32>,
-    stop_tokens: Option<Vec<String>>,
-) -> Result<HttpResponse, actix_web::Error> {
-    let dataset_config =
-        ServerDatasetConfiguration::from_json(dataset.server_configuration.clone());
-
-    let user_message = match messages.last() {
-        Some(message) => message.clone().content,
-        None => {
-            return Err(
-                ServiceError::BadRequest("No messages found for the topic".to_string()).into(),
-            );
-        }
-    };
-
-    let openai_messages: Vec<ChatMessage> = messages
-        .iter()
-        .map(|message| ChatMessage::from(message.clone()))
-        .collect();
-
-    let base_url = dataset_config.LLM_BASE_URL.clone();
-
-    let llm_api_key = if base_url.contains("openai.com") {
-        get_env!("OPENAI_API_KEY", "OPENAI_API_KEY for openai should be set").into()
-    } else {
-        get_env!(
-            "LLM_API_KEY",
-            "LLM_API_KEY for openrouter or self-hosted should be set"
-        )
-        .into()
-    };
-
-    let client = Client {
-        api_key: llm_api_key,
-        http_client: reqwest::Client::new(),
-        base_url,
-        organization: None,
-    };
-
-    let next_message_order = move || {
-        let messages_len = messages.len();
-        if messages_len == 0 {
-            return 2;
-        }
-        messages_len
-    };
-
-    let rag_prompt = dataset_config.RAG_PROMPT.clone();
-    let chosen_model = dataset_config.LLM_DEFAULT_MODEL.clone();
-
-    let mut query = user_message;
-    let use_message_to_query_prompt = dataset_config.USE_MESSAGE_TO_QUERY_PROMPT;
-    if use_message_to_query_prompt {
-        let message_to_query_prompt = dataset_config.MESSAGE_TO_QUERY_PROMPT.clone();
-
-        let gen_inference_parameters = ChatCompletionParameters {
-            model: chosen_model.clone(),
-            messages: vec![ChatMessage {
-                role: Role::User,
-                content: ChatMessageContent::Text(format!(
-                    "{}{}",
-                    message_to_query_prompt,
-                    match openai_messages
-                        .clone()
-                        .last()
-                        .expect("No messages")
-                        .clone()
-                        .content
-                    {
-                        ChatMessageContent::Text(text) => text,
-                        _ => "".to_string(),
-                    }
-                )),
-                tool_calls: None,
-                name: None,
-                tool_call_id: None,
-            }],
-            stream: Some(false),
-            temperature: None,
-            frequency_penalty: Some(0.8),
-            presence_penalty: Some(0.8),
-            stop: None,
-            top_p: None,
-            n: None,
-            max_tokens: None,
-            logit_bias: None,
-            user: None,
-            response_format: None,
-            tools: None,
-            tool_choice: None,
-            logprobs: None,
-            top_logprobs: None,
-            seed: None,
-        };
-
-        let search_query_from_message_to_query_prompt = client
-            .chat()
-            .create(gen_inference_parameters)
-            .await
-            .expect("No OpenAI Completion for chunk search");
-
-        query = match &search_query_from_message_to_query_prompt
-            .choices
-            .first()
-            .expect("No response for OpenAI completion")
-            .message
-            .content
-        {
-            ChatMessageContent::Text(query) => query.clone(),
-            _ => "".to_string(),
-        };
-    }
-
-    let n_retrievals_to_include = dataset_config.N_RETRIEVALS_TO_INCLUDE;
-    let search_chunk_data = SearchChunksReqPayload {
-        search_type: search_type.unwrap_or("hybrid".to_string()),
-        query: query.clone(),
-        page_size: Some(n_retrievals_to_include.try_into().unwrap_or(8)),
-        highlight_results,
-        highlight_delimiters,
-        filters,
-        ..Default::default()
-    };
-    let parsed_query = ParsedQuery {
-        query: query.clone(),
-        quote_words: None,
-        negated_words: None,
-    };
-    let mut search_timer = Timer::new();
-    let result_chunks = search_hybrid_chunks(
-        search_chunk_data,
-        parsed_query,
-        pool.clone(),
-        dataset.clone(),
-        dataset_config,
-        &mut search_timer,
-    )
-    .await?;
-    let chunk_metadatas = result_chunks
-        .score_chunks
-        .iter()
-        .map(
-            |score_chunk| match score_chunk.metadata.first().expect("No metadata found") {
-                ChunkMetadataTypes::Metadata(chunk_metadata) => chunk_metadata.clone(),
-                _ => unreachable!("The operator should never return slim chunks for this"),
-            },
-        )
-        .collect::<Vec<ChunkMetadataStringTagSet>>();
-
-    let mut chunk_metadatas_stringified =
-        serde_json::to_string(&chunk_metadatas).expect("Failed to serialize citation chunks");
-    let mut chunk_metadatas_stringified1 = chunk_metadatas_stringified.clone();
-
-    let rag_content = chunk_metadatas
-        .iter()
-        .enumerate()
-        .map(|(idx, chunk)| {
-            format!(
-                "Doc {}: {}",
-                idx + 1,
-                convert_html_to_text(&(chunk.chunk_html.clone().unwrap_or_default()))
-            )
-        })
-        .collect::<Vec<String>>()
-        .join("\n\n");
-
-    let last_message = ChatMessageContent::Text(format!(
-        "Here's my prompt: {} \n\n {} {}",
-        match &openai_messages
-            .last()
-            .expect("There needs to be at least 1 prior message")
-            .content
-        {
-            ChatMessageContent::Text(text) => text.clone(),
-            _ => "".to_string(),
-        },
-        rag_prompt,
-        rag_content,
-    ));
-
-    // replace the last message with the last message with evidence
-    let open_ai_messages = openai_messages
-        .clone()
-        .into_iter()
-        .enumerate()
-        .map(|(index, message)| {
-            if index == openai_messages.len() - 1 {
-                ChatMessage {
-                    role: message.role,
-                    content: last_message.clone(),
-                    name: message.name,
-                    tool_calls: None,
-                    tool_call_id: None,
-                }
-            } else {
-                message
-            }
-        })
-        .collect();
-
-    let parameters = ChatCompletionParameters {
-        model: chosen_model,
-        messages: open_ai_messages,
-        top_p: None,
-        n: None,
-        stream: Some(should_stream.unwrap_or(true)),
-        temperature: Some(temperature.unwrap_or(0.5)),
-        frequency_penalty: Some(frequency_penalty.unwrap_or(0.7)),
-        presence_penalty: Some(presence_penalty.unwrap_or(0.7)),
-        max_tokens,
-        stop: if let Some(stop_tokens) = stop_tokens {
-            Some(StopToken::Array(stop_tokens))
-        } else {
-            None
-        },
-        logit_bias: None,
-        user: None,
-        response_format: None,
-        tools: None,
-        tool_choice: None,
-        logprobs: None,
-        top_logprobs: None,
-        seed: None,
-    };
-
-    if !should_stream.unwrap_or(true) {
-        let assistant_completion =
-            client
-                .chat()
-                .create(parameters.clone())
-                .await
-                .map_err(|err| {
-                    ServiceError::BadRequest(format!(
-                        "Bad response from LLM server provider: {}",
-                        err
-                    ))
-                })?;
-
-        let completion_content = match &assistant_completion.choices[0].message.content {
-            ChatMessageContent::Text(text) => text.clone(),
-            _ => "".to_string(),
-        };
-
-        let new_message = models::Message::from_details(
-            format!(
-                "{}{}",
-                chunk_metadatas_stringified,
-                completion_content.clone()
-            ),
-            topic_id,
-            next_message_order()
-                .try_into()
-                .expect("usize to i32 conversion should always succeed"),
-            "assistant".to_string(),
-            None,
-            Some(
-                completion_content
-                    .len()
-                    .try_into()
-                    .expect("usize to i32 conversion should always succeed"),
-            ),
-            dataset.id,
-        );
-
-        let _ = create_message_query(new_message, &pool).await;
-
-        return Ok(HttpResponse::Ok().json(completion_content));
-    }
-
-    let (s, r) = unbounded::<String>();
-    let stream = client.chat().create_stream(parameters).await.unwrap();
-
-    if !chunk_metadatas_stringified.is_empty() {
-        chunk_metadatas_stringified = if completion_first.unwrap_or(false) {
-            format!("||{}", chunk_metadatas_stringified.replace("||", ""))
-        } else {
-            format!("{}||", chunk_metadatas_stringified.replace("||", ""))
-        };
-        chunk_metadatas_stringified1.clone_from(&chunk_metadatas_stringified);
-    }
-
-    Arbiter::new().spawn(async move {
-        let chunk_v: Vec<String> = r.iter().collect();
-        let completion = chunk_v.join("");
-
-        let new_message = models::Message::from_details(
-            format!("{}{}", chunk_metadatas_stringified, completion),
-            topic_id,
-            next_message_order().try_into().unwrap(),
-            "assistant".to_string(),
-            None,
-            Some(chunk_v.len().try_into().unwrap()),
-            dataset.id,
-        );
-
-        let _ = create_message_query(new_message, &pool).await;
-    });
-
-    let chunk_stream = stream::iter(vec![Ok(Bytes::from(chunk_metadatas_stringified1))]);
-    let completion_stream = stream.map(move |response| -> Result<Bytes, actix_web::Error> {
-        if let Ok(response) = response {
-            let chat_content = response.choices[0].delta.content.clone();
-            if let Some(message) = chat_content.clone() {
-                s.send(message).unwrap();
-            }
-            return Ok(Bytes::from(chat_content.unwrap_or("".to_string())));
-        }
-        Err(ServiceError::InternalServerError(
-            "Model Response Error. Please try again later.".into(),
-        )
-        .into())
-    });
-
-    if completion_first.unwrap_or(false) {
-        return Ok(HttpResponse::Ok().streaming(completion_stream.chain(chunk_stream)));
-    }
-
-    Ok(HttpResponse::Ok().streaming(chunk_stream.chain(completion_stream)))
 }
 
 #[derive(Deserialize, Serialize, Debug, ToSchema)]
@@ -1016,7 +639,7 @@ pub async fn get_suggested_queries(
         },
         pool,
         dataset_org_plan_sub.dataset.clone(),
-        dataset_config,
+        &dataset_config,
         &mut Timer::new(),
     )
     .await

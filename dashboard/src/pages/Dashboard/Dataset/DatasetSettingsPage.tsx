@@ -14,7 +14,7 @@ import {
   ClientEnvsConfiguration,
   ServerEnvsConfiguration,
   availableEmbeddingModels,
-} from "../../../types/apiTypes";
+} from "shared/types";
 import { UserContext } from "../../../contexts/UserContext";
 import { createToast } from "../../../components/ShowToasts";
 import { AiOutlineInfoCircle } from "solid-icons/ai";
@@ -52,6 +52,12 @@ export const defaultServerEnvsConfiguration: ServerEnvsConfiguration = {
   QDRANT_COLLECTION_NAME: null,
   EMBEDDING_QUERY_PREFIX: "Search for: ",
   USE_MESSAGE_TO_QUERY_PROMPT: false,
+  FREQUENCY_PENALTY: null,
+  TEMPERATURE: null,
+  PRESENCE_PENALTY: null,
+  STOP_TOKENS: null,
+  INDEXED_ONLY: false,
+  LOCKED: false,
 };
 
 export const FrontendSettingsForm = () => {
@@ -136,30 +142,6 @@ export const FrontendSettingsForm = () => {
                 class="block w-full rounded-md border-[0.5px] border-neutral-300 px-3 py-1.5 shadow-sm placeholder:text-neutral-400 focus:outline-magenta-500 sm:text-sm sm:leading-6"
                 value={name()}
                 onInput={(e) => setName(e.target.value)}
-              />
-            </div>
-
-            <div class="col-span-4 sm:col-span-2">
-              <label
-                for="linesBeforeShowMore"
-                class="block text-sm font-medium leading-6"
-              >
-                Lines before show more
-              </label>
-              <input
-                type="number"
-                name="linesBeforeShowMore"
-                id="linesBeforeShowMore"
-                class="block w-full rounded-md border-[0.5px] border-neutral-300 px-3 py-1.5 shadow-sm placeholder:text-neutral-400 focus:outline-magenta-500 sm:text-sm sm:leading-6"
-                value={clientConfig().LINES_BEFORE_SHOW_MORE}
-                onInput={(e) =>
-                  setClientConfig((prev) => {
-                    return {
-                      ...prev,
-                      LINES_BEFORE_SHOW_MORE: e.target.valueAsNumber,
-                    };
-                  })
-                }
               />
             </div>
 
@@ -352,22 +334,25 @@ export const ServerSettingsForm = () => {
 
             <div class="col-span-4 sm:col-span-2">
               <label
-                for="nRetrivialsToInclude"
+                for="nRetreivalsToInclude"
                 class="block text-sm font-medium leading-6"
               >
-                N Retrivials To Include (RAG-inference)
+                N Retrievals To Include (RAG-inference)
               </label>
               <input
+                name="nRetreivalsToInclude"
                 type="number"
-                name="nRetrivialsToInclude"
+                placeholder="something"
                 id="linesBeforeShowMore"
                 class="block w-full rounded-md border-[0.5px] border-neutral-300 px-3 py-1.5 shadow-sm placeholder:text-neutral-400 focus:outline-magenta-500 sm:text-sm sm:leading-6"
                 value={serverConfig().N_RETRIEVALS_TO_INCLUDE}
-                onInput={(e) =>
+                onChange={(e) =>
                   setServerConfig((prev) => {
                     return {
                       ...prev,
-                      N_RETRIEVALS_TO_INCLUDE: e.currentTarget.valueAsNumber,
+                      N_RETRIEVALS_TO_INCLUDE: parseFloat(
+                        e.currentTarget.value,
+                      ),
                     };
                   })
                 }
@@ -376,24 +361,68 @@ export const ServerSettingsForm = () => {
 
             <div class="col-span-4 sm:col-span-2">
               <label
-                for="duplicateThreshold"
+                for="temperature"
                 class="block text-sm font-medium leading-6"
               >
-                Duplicate Threshold
+                Temperature (HyDE)
               </label>
               <input
                 type="number"
-                step={0.1}
-                name="duplicateThreshold"
+                name="temperature"
                 id="linesBeforeShowMore"
                 class="block w-full rounded-md border-[0.5px] border-neutral-300 px-3 py-1.5 shadow-sm placeholder:text-neutral-400 focus:outline-magenta-500 sm:text-sm sm:leading-6"
-                value={serverConfig().DUPLICATE_DISTANCE_THRESHOLD}
-                onInput={(e) =>
+                value={serverConfig().TEMPERATURE ?? 0}
+                onChange={(e) =>
                   setServerConfig((prev) => {
                     return {
                       ...prev,
-                      DUPLICATE_DISTANCE_THRESHOLD:
-                        e.currentTarget.valueAsNumber,
+                      TEMPERATURE: e.currentTarget.valueAsNumber,
+                    };
+                  })
+                }
+              />
+            </div>
+            <div class="col-span-4 sm:col-span-2">
+              <label
+                for="presencePenalty"
+                class="block text-sm font-medium leading-6"
+              >
+                Presence Penalty (HyDE)
+              </label>
+              <input
+                type="number"
+                name="presencePenalty"
+                id="linesBeforeShowMore"
+                class="block w-full rounded-md border-[0.5px] border-neutral-300 px-3 py-1.5 shadow-sm placeholder:text-neutral-400 focus:outline-magenta-500 sm:text-sm sm:leading-6"
+                value={serverConfig().PRESENCE_PENALTY ?? 0}
+                onChange={(e) =>
+                  setServerConfig((prev) => {
+                    return {
+                      ...prev,
+                      PRESENCE_PENALTY: e.currentTarget.valueAsNumber,
+                    };
+                  })
+                }
+              />
+            </div>
+            <div class="col-span-4 sm:col-span-2">
+              <label
+                for="frequencyPenalty"
+                class="block text-sm font-medium leading-6"
+              >
+                Frequency Penalty (HyDE)
+              </label>
+              <input
+                type="number"
+                name="frequencyPenalty"
+                id="linesBeforeShowMore"
+                class="block w-full rounded-md border-[0.5px] border-neutral-300 px-3 py-1.5 shadow-sm placeholder:text-neutral-400 focus:outline-magenta-500 sm:text-sm sm:leading-6"
+                value={serverConfig().FREQUENCY_PENALTY ?? 0}
+                onChange={(e) =>
+                  setServerConfig((prev) => {
+                    return {
+                      ...prev,
+                      FREQUENCY_PENALTY: e.currentTarget.valueAsNumber,
                     };
                   })
                 }
@@ -426,6 +455,30 @@ export const ServerSettingsForm = () => {
 
             <div class="col-span-4 sm:col-span-2">
               <label
+                for="stopTokens"
+                class="block text-sm font-medium leading-6"
+              >
+                Stop Tokens (HyDE)
+              </label>
+              <textarea
+                value={serverConfig().STOP_TOKENS ?? ""}
+                onInput={(e) =>
+                  setServerConfig((prev) => {
+                    return {
+                      ...prev,
+                      STOP_TOKENS: e.currentTarget.value,
+                    };
+                  })
+                }
+                rows="4"
+                name="ragPrompt"
+                id="ragPrompt"
+                class="block w-full rounded-md border-[0.5px] border-neutral-300 px-3 py-1.5 shadow-sm placeholder:text-neutral-400 focus:outline-magenta-500 sm:text-sm sm:leading-6"
+              />
+            </div>
+
+            <div class="col-span-4 sm:col-span-2">
+              <label
                 for="ragPrompt"
                 class="block text-sm font-medium leading-6"
               >
@@ -449,7 +502,7 @@ export const ServerSettingsForm = () => {
             </div>
 
             <div class="col-span-4 space-y-1 sm:col-span-2">
-              <div class="flex">
+              <div class="flex items-center">
                 <label
                   for="embeddingSize"
                   class="mr-2 block text-sm font-medium leading-6"
@@ -457,7 +510,7 @@ export const ServerSettingsForm = () => {
                   Embedding Model
                 </label>
                 <AiOutlineInfoCircle
-                  class="h-5 w-5 text-neutral-400"
+                  class="h-5 w-5 text-neutral-400 hover:cursor-help"
                   title="Embedding Model is only editable on creation"
                 />
               </div>
@@ -481,7 +534,7 @@ export const ServerSettingsForm = () => {
             </div>
 
             <div class="col-span-4 space-y-1 sm:col-span-2">
-              <div class="flex">
+              <div class="flex items-center">
                 <label
                   for="embeddingSize"
                   class="mr-2 block text-sm font-medium leading-6"
@@ -489,7 +542,7 @@ export const ServerSettingsForm = () => {
                   Embedding Query Prefix
                 </label>
                 <AiOutlineInfoCircle
-                  class="h-5 w-5 text-neutral-400"
+                  class="h-5 w-5 text-neutral-400 hover:cursor-help"
                   title="For some embedding models, the training data includes query prefixes. The default for Jina is 'Search for: '. You can experiment with different values."
                 />
               </div>
@@ -530,29 +583,6 @@ export const ServerSettingsForm = () => {
                 class="block text-sm font-medium leading-6"
               >
                 Use Message to Query Prompt (HyDE)
-              </label>
-            </div>
-
-            <div class="col-span-4 flex items-center space-x-2 sm:col-span-2">
-              <input
-                type="checkbox"
-                name="collisionsEnabled"
-                id="collisionsEnabled"
-                checked={serverConfig().COLLISIONS_ENABLED}
-                onInput={(e) =>
-                  setServerConfig((prev) => {
-                    return {
-                      ...prev,
-                      COLLISIONS_ENABLED: e.currentTarget.checked,
-                    };
-                  })
-                }
-              />
-              <label
-                for="collisionsEnabled"
-                class="block text-sm font-medium leading-6"
-              >
-                Collisions Enabled
               </label>
             </div>
 
@@ -605,6 +635,26 @@ export const ServerSettingsForm = () => {
             <div class="col-span-4 flex items-center space-x-2 sm:col-span-2">
               <input
                 type="checkbox"
+                name="lockDataset"
+                id="lockDataset"
+                checked={serverConfig().LOCKED}
+                onInput={(e) =>
+                  setServerConfig((prev) => {
+                    return {
+                      ...prev,
+                      LOCKED: e.currentTarget.checked,
+                    };
+                  })
+                }
+              />
+              <label for="lockDataset" class="block text-sm font-medium">
+                Lock dataset
+              </label>
+            </div>
+
+            <div class="col-span-4 flex items-center space-x-2 sm:col-span-2">
+              <input
+                type="checkbox"
                 name="documentDownloadFeature"
                 id="documentDownloadFeature"
                 checked={serverConfig().DOCUMENT_DOWNLOAD_FEATURE}
@@ -623,6 +673,34 @@ export const ServerSettingsForm = () => {
               >
                 Document download feature
               </label>
+            </div>
+            <div class="col-span-4 flex items-center space-x-2 sm:col-span-2">
+              <input
+                type="checkbox"
+                name="indexedOnly"
+                id="indexedOnly"
+                checked={serverConfig().INDEXED_ONLY}
+                onInput={(e) =>
+                  setServerConfig((prev) => {
+                    return {
+                      ...prev,
+                      INDEXED_ONLY: e.currentTarget.checked,
+                    };
+                  })
+                }
+              />
+              <div class="flex items-center">
+                <label
+                  for="embeddingSize"
+                  class="mr-2 block text-sm font-medium leading-6"
+                >
+                  Indexed Only
+                </label>
+                <AiOutlineInfoCircle
+                  class="h-5 w-5 text-neutral-400 hover:cursor-help"
+                  title="If enabled, only indexed documents will be returned in search results. This defaults to false because it can make it seem like ingested documents are missing because they are not yet indexed."
+                />
+              </div>
             </div>
           </div>
         </div>

@@ -5,11 +5,13 @@ use super::{
 use crate::{
     data::models::{
         ChunkGroup, ChunkGroupAndFile, ChunkGroupBookmark, ChunkMetadata,
-        DatasetAndOrgWithSubAndPlan, Pool, ScoreChunkDTO, ServerDatasetConfiguration, UnifiedId,
+        DatasetAndOrgWithSubAndPlan, Pool, RedisPool, ScoreChunkDTO, SearchQueryEventClickhouse,
+        ServerDatasetConfiguration, UnifiedId,
     },
     errors::ServiceError,
     operators::{
         chunk_operator::get_metadata_from_tracking_id_query,
+        clickhouse_operator::{get_latency_from_header, send_to_clickhouse, ClickHouseEvent},
         group_operator::*,
         qdrant_operator::{
             add_bookmark_to_qdrant_query, recommend_qdrant_groups_query,
@@ -122,7 +124,7 @@ pub async fn create_chunk_group(
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct GroupData {
     pub groups: Vec<ChunkGroupAndFile>,
-    pub total_pages: i64,
+    pub total_pages: i32,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -153,7 +155,7 @@ pub struct DatasetGroupQuery {
     )
 )]
 #[tracing::instrument(skip(pool))]
-pub async fn get_specific_dataset_chunk_groups(
+pub async fn get_groups_for_dataset(
     dataset_and_page: web::Path<DatasetGroupQuery>,
     _dataset_org_plan_sub: DatasetAndOrgWithSubAndPlan,
     pool: web::Data<Pool>,
@@ -163,7 +165,10 @@ pub async fn get_specific_dataset_chunk_groups(
         get_groups_for_dataset_query(dataset_and_page.page, dataset_and_page.dataset_id, pool)
             .await?;
 
-    Ok(HttpResponse::Ok().json(groups))
+    Ok(HttpResponse::Ok().json(GroupData {
+        groups: groups.0,
+        total_pages: groups.1.unwrap_or(1),
+    }))
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -457,6 +462,9 @@ pub struct UpdateChunkGroupData {
     pub metadata: Option<serde_json::Value>,
     /// Optional tags to assign to the chunk_group. This is a list of strings that can be used to categorize the chunks inside the chunk_group.
     pub tag_set: Option<Vec<String>>,
+    /// Flag to update the chunks in the group. If true, each chunk in the group will be updated
+    /// by appending the group's tags to the chunk's tags. Default is false.
+    pub update_chunks: Option<bool>,
 }
 
 /// Update Group
@@ -483,6 +491,7 @@ pub struct UpdateChunkGroupData {
 pub async fn update_chunk_group(
     data: web::Json<UpdateChunkGroupData>,
     pool: web::Data<Pool>,
+    redis_pool: web::Data<RedisPool>,
     dataset_org_plan_sub: DatasetAndOrgWithSubAndPlan,
     _user: AdminOnly,
 ) -> Result<HttpResponse, actix_web::Error> {
@@ -524,7 +533,15 @@ pub async fn update_chunk_group(
         group_tag_set.or(group.tag_set.clone()),
     );
 
-    update_chunk_group_query(new_chunk_group, pool).await?;
+    update_chunk_group_query(new_chunk_group.clone(), pool).await?;
+
+    if data.update_chunks.unwrap_or(false) {
+        let server_dataset_config = ServerDatasetConfiguration::from_json(
+            dataset_org_plan_sub.dataset.server_configuration.clone(),
+        );
+        soft_update_grouped_chunks_query(new_chunk_group, group, redis_pool, server_dataset_config)
+            .await?;
+    }
 
     Ok(HttpResponse::NoContent().finish())
 }
@@ -1177,11 +1194,11 @@ pub struct SearchWithinGroupResults {
         ("ApiKey" = ["readonly"]),
     )
 )]
-#[allow(clippy::too_many_arguments)]
-#[tracing::instrument(skip(pool))]
+#[tracing::instrument(skip(pool, clickhouse_client))]
 pub async fn search_within_group(
     data: web::Json<SearchWithinGroupData>,
     pool: web::Data<Pool>,
+    clickhouse_client: web::Data<clickhouse::Client>,
     _required_user: LoggedUser,
     dataset_org_plan_sub: DatasetAndOrgWithSubAndPlan,
 ) -> Result<HttpResponse, actix_web::Error> {
@@ -1193,6 +1210,7 @@ pub async fn search_within_group(
     let group_id = data.group_id;
     let dataset_id = dataset_org_plan_sub.dataset.id;
     let search_pool = pool.clone();
+    let mut timer = Timer::new();
 
     let group = {
         if let Some(group_id) = group_id {
@@ -1223,8 +1241,8 @@ pub async fn search_within_group(
                 parsed_query,
                 group,
                 search_pool,
-                dataset_org_plan_sub.dataset,
-                server_dataset_config,
+                dataset_org_plan_sub.dataset.clone(),
+                &server_dataset_config,
             )
             .await?
         }
@@ -1234,8 +1252,8 @@ pub async fn search_within_group(
                 parsed_query,
                 group,
                 search_pool,
-                dataset_org_plan_sub.dataset,
-                server_dataset_config,
+                dataset_org_plan_sub.dataset.clone(),
+                &server_dataset_config,
             )
             .await?
         }
@@ -1245,12 +1263,36 @@ pub async fn search_within_group(
                 parsed_query,
                 group,
                 search_pool,
-                dataset_org_plan_sub.dataset,
-                server_dataset_config,
+                dataset_org_plan_sub.dataset.clone(),
+                &server_dataset_config,
             )
             .await?
         }
     };
+    timer.add("search_chunks");
+
+    let clickhouse_event = SearchQueryEventClickhouse {
+        id: uuid::Uuid::new_v4(),
+        search_type: String::from("search_within_groups"),
+        query: data.query.clone(),
+        request_params: serde_json::to_string(&data.clone()).unwrap(),
+        latency: get_latency_from_header(timer.header_value()),
+        top_score: result_chunks
+            .bookmarks
+            .first()
+            .map(|x| x.score as f32)
+            .unwrap_or(0.0),
+        results: result_chunks.into_response_payload(),
+        dataset_id: dataset_org_plan_sub.dataset.id,
+        created_at: time::OffsetDateTime::now_utc(),
+    };
+
+    let _ = send_to_clickhouse(
+        ClickHouseEvent::SearchQueryEvent(clickhouse_event),
+        &clickhouse_client,
+    )
+    .await;
+    timer.add("send_to_clickhouse");
 
     Ok(HttpResponse::Ok().json(result_chunks))
 }
@@ -1311,10 +1353,11 @@ pub struct SearchOverGroupsData {
         ("ApiKey" = ["readonly"]),
     )
 )]
-#[tracing::instrument(skip(pool))]
+#[tracing::instrument(skip(pool, clickhouse_client))]
 pub async fn search_over_groups(
     data: web::Json<SearchOverGroupsData>,
     pool: web::Data<Pool>,
+    clickhouse_client: web::Data<clickhouse::Client>,
     _required_user: LoggedUser,
     dataset_org_plan_sub: DatasetAndOrgWithSubAndPlan,
 ) -> Result<HttpResponse, actix_web::Error> {
@@ -1339,8 +1382,8 @@ pub async fn search_over_groups(
                 data.clone(),
                 parsed_query,
                 pool,
-                dataset_org_plan_sub.dataset,
-                server_dataset_config,
+                dataset_org_plan_sub.dataset.clone(),
+                &server_dataset_config,
                 &mut timer,
             )
             .await?
@@ -1350,8 +1393,8 @@ pub async fn search_over_groups(
                 data.clone(),
                 parsed_query,
                 pool,
-                dataset_org_plan_sub.dataset,
-                server_dataset_config,
+                dataset_org_plan_sub.dataset.clone(),
+                &server_dataset_config,
                 &mut timer,
             )
             .await?
@@ -1361,13 +1404,37 @@ pub async fn search_over_groups(
                 data.clone(),
                 parsed_query,
                 pool,
-                dataset_org_plan_sub.dataset,
-                server_dataset_config,
+                dataset_org_plan_sub.dataset.clone(),
+                &server_dataset_config,
                 &mut timer,
             )
             .await?
         }
     };
+    timer.add("search_chunks");
+
+    let clickhouse_event = SearchQueryEventClickhouse {
+        id: uuid::Uuid::new_v4(),
+        search_type: String::from("search_over_groups"),
+        query: data.query.clone(),
+        request_params: serde_json::to_string(&data.clone()).unwrap(),
+        latency: get_latency_from_header(timer.header_value()),
+        top_score: result_chunks
+            .group_chunks
+            .first()
+            .map(|x| x.metadata.first().map(|y| y.score as f32).unwrap_or(0.0))
+            .unwrap_or(0.0),
+        results: result_chunks.into_response_payload(),
+        dataset_id: dataset_org_plan_sub.dataset.id,
+        created_at: time::OffsetDateTime::now_utc(),
+    };
+
+    let _ = send_to_clickhouse(
+        ClickHouseEvent::SearchQueryEvent(clickhouse_event),
+        &clickhouse_client,
+    )
+    .await;
+    timer.add("send_to_clickhouse");
 
     Ok(HttpResponse::Ok()
         .insert_header((Timer::header_key(), timer.header_value()))

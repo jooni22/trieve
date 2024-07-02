@@ -5,7 +5,6 @@ import { Route, Router } from "@solidjs/router";
 import * as Sentry from "@sentry/browser";
 import { DEV } from "solid-js";
 import { Home } from "./layouts/HomeLayout";
-import { Search } from "./pages/Search";
 import { Upload } from "./pages/Upload";
 import { CreateChunk } from "./pages/CreateChunk";
 import { EditChunk } from "./pages/chunk/edit/EditChunk";
@@ -13,6 +12,12 @@ import { ViewChunk } from "./pages/chunk/ViewChunk";
 import { ViewGroup } from "./pages/group/ViewGroup";
 import { OrgGroups } from "./pages/group/OrgGroups";
 import { OrgFiles } from "./pages/file/OrgFiles";
+
+const NotFoundRedirect = () => {
+  window.location.href = "/";
+
+  return <></>;
+};
 
 if (!DEV) {
   Sentry.init({
@@ -37,7 +42,6 @@ render(
   () => (
     <Router>
       <Route path="/" component={Home} />
-      <Route path="/search" component={Search} />
       <Route path="/upload" component={Upload} />
       <Route path="/create" component={CreateChunk} />
       <Route path="/chunk">
@@ -47,6 +51,7 @@ render(
       <Route path="/group" component={OrgGroups} />
       <Route path="/group/:id" component={ViewGroup} />
       <Route path="/files" component={OrgFiles} />
+      <Route path="/:not_found" component={NotFoundRedirect} />
     </Router>
   ),
   // eslint-disable-next-line @typescript-eslint/no-non-null-assertion

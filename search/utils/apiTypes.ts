@@ -72,21 +72,20 @@ export const isChunkMetadata = (chunk: unknown): chunk is ChunkMetadata => {
   );
 };
 
-export interface ChunkGroupDTO {
+export interface ChunkGroup {
   id: string;
   name: string;
   description: string;
-}
-
-export interface SlimGroup {
-  id: string;
-  name: string;
-  of_current_dataset: boolean;
+  dataset_id: string;
+  created_at: string;
+  updated_at: string;
+  tracking_id: string;
+  tag_set: string[];
 }
 
 export interface ChunkBookmarksDTO {
   chunk_uuid: string;
-  slim_groups: SlimGroup[];
+  slim_groups: ChunkGroup[];
 }
 
 export interface ChunksWithTotalPagesDTO {
@@ -272,6 +271,7 @@ export interface ChunkGroupDTO {
   id: string;
   name: string;
   description: string;
+  file_id?: string;
   created_at: string;
   updated_at: string;
 }
@@ -452,7 +452,7 @@ export const defaultClientEnvsConfiguration: ClientEnvsConfiguration = {
   SEARCH_QUERIES:
     "star github.com/devflowinc/trieve, no seriously please star github.com/devflowinc/trieve, you know you want to star github.com/devflowinc/trieve",
   FRONTMATTER_VALS: "link,tag_set,file_name,time_stamp,location",
-  LINES_BEFORE_SHOW_MORE: 10,
+  LINES_BEFORE_SHOW_MORE: 15,
   DATE_RANGE_VALUE: "Date",
   FILTER_ITEMS: [],
   SUGGESTED_QUERIES: "",
@@ -488,8 +488,8 @@ export interface DatasetDTO {
   created_at: string;
   updated_at: string;
   organization_id: string;
-  server_configuration: string;
-  client_configuration: object;
+  server_configuration: Record<string, any>;
+  client_configuration: Record<string, any>;
 }
 
 export const isDatasetDTO = (dataset: unknown): dataset is DatasetDTO => {
@@ -569,8 +569,9 @@ export interface ChunkFile {
   updated_at: string;
   size: number;
   tag_set: string | null;
-  metadata: object | null;
+  metadata: Record<string, any> | null;
   link: string | null;
+  s3_url?: string;
   time_stamp: string | null;
   dataset_id: string;
 }

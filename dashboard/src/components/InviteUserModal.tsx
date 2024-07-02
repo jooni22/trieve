@@ -1,13 +1,9 @@
-import { Accessor, Show, createEffect, useContext } from "solid-js";
+import { Accessor, Show, useContext } from "solid-js";
 import { createSignal } from "solid-js";
 import { Dialog, DialogOverlay, DialogPanel, DialogTitle } from "terracotta";
 import { UserContext } from "../contexts/UserContext";
-import { DefaultError } from "../types/apiTypes";
-import {
-  UserRole,
-  fromUserRoleToI32,
-  stringToUserRole,
-} from "../types/apiTypes";
+import { DefaultError } from "shared/types";
+import { UserRole, fromUserRoleToI32, stringToUserRole } from "shared/types";
 import { createToast } from "./ShowToasts";
 
 export interface InviteUserModalProps {
@@ -24,7 +20,7 @@ export const InviteUserModal = (props: InviteUserModalProps) => {
 
   const userContext = useContext(UserContext);
 
-  const inviteUser = () => {
+  const inviteUser = (closeModal: () => void) => {
     setSendingEmail(true);
     void fetch(`${apiHost}/invitation`, {
       method: "POST",
@@ -44,25 +40,23 @@ export const InviteUserModal = (props: InviteUserModalProps) => {
       }),
     }).then((res) => {
       setSendingEmail(false);
-      createEffect(() => {
-        if (res.ok) {
-          props.closeModal();
+      if (res.ok) {
+        closeModal();
+        createToast({
+          title: "Success",
+          type: "success",
+          message:
+            "User invited successfully. If the user is not registered, they will receive an email invite to sign up and be automatically added to this organization.",
+        });
+      } else {
+        void res.json().then((data) => {
           createToast({
-            title: "Success",
-            type: "success",
-            message:
-              "User invited successfully. If the user is not registered, they will receive an email invite to sign up and be automatically added to this organization.",
+            title: "Error",
+            type: "error",
+            message: (data as DefaultError).message,
           });
-        } else {
-          void res.json().then((data) => {
-            createToast({
-              title: "Error",
-              type: "error",
-              message: (data as DefaultError).message,
-            });
-          });
-        }
-      });
+        });
+      }
     });
   };
   return (
@@ -83,7 +77,7 @@ export const InviteUserModal = (props: InviteUserModalProps) => {
             <form
               onSubmit={(e) => {
                 e.preventDefault();
-                inviteUser();
+                inviteUser(props.closeModal);
               }}
             >
               <div class="space-y-12 sm:space-y-16">

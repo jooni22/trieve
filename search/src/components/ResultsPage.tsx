@@ -5,13 +5,12 @@ import {
   createEffect,
   createSignal,
   For,
-  Setter,
-  Accessor,
   Match,
   Switch,
   useContext,
   onCleanup,
   createMemo,
+  on,
 } from "solid-js";
 import {
   type ChunkGroupDTO,
@@ -31,25 +30,10 @@ import { DatasetAndUserContext } from "./Contexts/DatasetAndUserContext";
 import { FaSolidChevronDown, FaSolidChevronUp } from "solid-icons/fa";
 import { Filters } from "./FilterModal";
 import { createToast } from "./ShowToasts";
+import { SearchStore } from "../hooks/useSearch";
 
 export interface ResultsPageProps {
-  query: string;
-  page: number;
-  scoreThreshold: number;
-  searchType: string;
-  recencyBias?: number;
-  extendResults?: boolean;
-  groupUnique?: boolean;
-  slimChunks?: boolean;
-  pageSize?: number;
-  getTotalPages?: boolean;
-  highlightResults?: boolean;
-  highlightDelimiters?: string[];
-  highlightMaxLength?: number;
-  highlightMaxNum?: number;
-  highlightWindow?: number;
-  loading: Accessor<boolean>;
-  setLoading: Setter<boolean>;
+  search: SearchStore;
 }
 
 const ResultsPage = (props: ResultsPageProps) => {
@@ -57,6 +41,9 @@ const ResultsPage = (props: ResultsPageProps) => {
   const datasetAndUserContext = useContext(DatasetAndUserContext);
 
   const $dataset = datasetAndUserContext.currentDataset;
+
+  const [loading, setLoading] = createSignal(false);
+  const [page, setPage] = createSignal(1);
 
   const [chunkCollections, setChunkCollections] = createSignal<ChunkGroupDTO[]>(
     [],
@@ -79,7 +66,6 @@ const ResultsPage = (props: ResultsPageProps) => {
   const [noResults, setNoResults] = createSignal(false);
   const [filters, setFilters] = createSignal<Filters>({} as Filters);
   const [totalPages, setTotalPages] = createSignal(0);
-  const [triggerSearch, setTriggerSearch] = createSignal(false);
 
   const fetchChunkCollections = () => {
     if (!$currentUser?.()) return;
@@ -102,6 +88,10 @@ const ResultsPage = (props: ResultsPageProps) => {
       }
     });
   };
+
+  createEffect(() => {
+    fetchChunkCollections();
+  });
 
   const fetchBookmarks = () => {
     const dataset = $dataset?.();
@@ -134,121 +124,151 @@ const ResultsPage = (props: ResultsPageProps) => {
       `filters-${datasetAndUserContext.currentDataset?.()?.dataset.id ?? ""}`,
   );
 
-  createEffect(() => {
-    const dataset = $dataset?.();
-    if (!dataset) return;
-
-    triggerSearch();
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const requestBody: any = {
-      query: props.query,
-      page: props.page,
-      filters: filters(),
-      search_type: props.searchType.includes("autocomplete")
-        ? props.searchType.replace("autocomplete-", "")
-        : props.searchType,
-      score_threshold: props.scoreThreshold,
-      recency_bias: props.recencyBias ?? 0.0,
-      get_collisions: true,
-      slim_chunks: props.slimChunks ?? false,
-      page_size: props.pageSize ?? 10,
-      get_total_pages: props.getTotalPages ?? false,
-      highlight_results: props.highlightResults ?? true,
-      highlight_delimiters: props.highlightDelimiters ?? ["?", ".", "!"],
-      highlight_max_length: props.highlightMaxLength ?? 8,
-      highlight_max_num: props.highlightMaxNum ?? 3,
-      highlight_window: props.highlightWindow ?? 0,
-    };
-
-    let searchRoute = "chunk/search";
-    const groupUnique = props.groupUnique;
-    if (groupUnique) {
-      searchRoute = "chunk_group/group_oriented_search";
-    }
-
-    if (props.searchType.includes("autocomplete")) {
-      searchRoute = "chunk/autocomplete";
-      requestBody["extend_results"] = props.extendResults ?? false;
-    }
-
-    props.setLoading(true);
-
-    setGroupResultChunks([]);
-    setResultChunks([]);
-    setNoResults(false);
-
-    const abortController = new AbortController();
-
-    void fetch(`${apiHost}/${searchRoute}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "TR-Dataset": dataset.dataset.id,
+  createEffect(
+    on(
+      () => [props.search.state.query],
+      () => {
+        if (!props.search.state.query) {
+          setResultChunks([]);
+          setGroupResultChunks([]);
+          setClientSideRequestFinished(true);
+        }
       },
-      signal: abortController.signal,
-      credentials: "include",
-      body: JSON.stringify(requestBody),
-    }).then((response) => {
-      if (response.ok) {
-        void response.json().then((data) => {
-          let resultingChunks: ScoreChunkDTO[] = [];
-          if (groupUnique) {
-            // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-            const groupResult = data.group_chunks as GroupScoreChunkDTO[];
-            // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-            setTotalPages(data.total_chunk_pages);
+    ),
+  );
 
-            setGroupResultChunks(groupResult);
+  const dataset = createMemo(() => {
+    if ($dataset) {
+      return $dataset();
+    } else {
+      return null;
+    }
+  });
 
-            resultingChunks = groupResult.flatMap((groupChunkDTO) => {
-              return groupChunkDTO.metadata;
-            });
-          } else {
-            // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-            resultingChunks = data.score_chunks as ScoreChunkDTO[];
-
-            setResultChunks(resultingChunks);
-            // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-            setTotalPages(data.total_chunk_pages);
-          }
-
-          if (resultingChunks.length === 0) {
-            setNoResults(true);
-          }
-        });
-      } else {
-        void response
-          .json()
-          .then((data) => {
-            createToast({
-              type: "error",
-              message: data.message,
-            });
-          })
-          .catch(() => {
-            createToast({
-              type: "error",
-              message: "An unknown error occurred while searching",
-            });
-          });
-
-        setNoResults(true);
+  createEffect(
+    on([() => props.search.debounced.version, dataset, page], () => {
+      const dataset = $dataset?.();
+      if (!dataset) return;
+      if (
+        !props.search.debounced.query ||
+        props.search.debounced.query === ""
+      ) {
+        setLoading(false);
+        return;
       }
 
-      setClientSideRequestFinished(true);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const requestBody: any = {
+        query: props.search.debounced.query,
+        page: page(),
+        filters: filters(),
+        search_type: props.search.debounced.searchType.includes("autocomplete")
+          ? props.search.debounced.searchType.replace("autocomplete-", "")
+          : props.search.debounced.searchType,
+        score_threshold: props.search.debounced.scoreThreshold,
+        recency_bias: props.search.debounced.recencyBias ?? 0.0,
+        get_collisions: true,
+        slim_chunks: props.search.debounced.slimChunks ?? false,
+        page_size: props.search.debounced.pageSize ?? 10,
+        get_total_pages: props.search.debounced.getTotalPages ?? false,
+        highlight_results: props.search.debounced.highlightResults ?? true,
+        highlight_delimiters: props.search.debounced.highlightDelimiters ?? [
+          "?",
+          ".",
+          "!",
+        ],
+        highlight_max_length: props.search.debounced.highlightMaxLength ?? 8,
+        highlight_max_num: props.search.debounced.highlightMaxNum ?? 3,
+        highlight_window: props.search.debounced.highlightWindow ?? 0,
+        group_size: props.search.debounced.group_size ?? 3,
+      };
 
-      createEffect(() => {
-        props.setLoading(false);
+      let searchRoute = "chunk/search";
+      const groupUnique = props.search.debounced.groupUniqueSearch;
+      if (groupUnique) {
+        searchRoute = "chunk_group/group_oriented_search";
+      }
+
+      if (props.search.debounced.searchType.includes("autocomplete")) {
+        searchRoute = "chunk/autocomplete";
+        requestBody["extend_results"] =
+          props.search.debounced.extendResults ?? false;
+      }
+
+      setLoading(true);
+
+      setGroupResultChunks([]);
+      setResultChunks([]);
+      setNoResults(false);
+
+      const abortController = new AbortController();
+
+      void fetch(`${apiHost}/${searchRoute}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "TR-Dataset": dataset.dataset.id,
+        },
+        signal: abortController.signal,
+        credentials: "include",
+        body: JSON.stringify(requestBody),
+      }).then((response) => {
+        if (response.ok) {
+          void response.json().then((data) => {
+            let resultingChunks: ScoreChunkDTO[] = [];
+            if (groupUnique) {
+              // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+              const groupResult = data.group_chunks as GroupScoreChunkDTO[];
+              // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+              setTotalPages(data.total_chunk_pages);
+
+              setGroupResultChunks(groupResult);
+
+              resultingChunks = groupResult.flatMap((groupChunkDTO) => {
+                return groupChunkDTO.metadata;
+              });
+            } else {
+              // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+              resultingChunks = data.score_chunks as ScoreChunkDTO[];
+
+              setResultChunks(resultingChunks);
+              // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+              setTotalPages(data.total_chunk_pages);
+            }
+
+            if (resultingChunks.length === 0) {
+              setNoResults(true);
+            }
+          });
+        } else {
+          void response
+            .json()
+            .then((data) => {
+              createToast({
+                type: "error",
+                message: data.message,
+              });
+            })
+            .catch(() => {
+              createToast({
+                type: "error",
+                message: "An unknown error occurred while searching",
+              });
+            });
+
+          setNoResults(true);
+        }
+
+        setClientSideRequestFinished(true);
+
+        setLoading(false);
       });
-    });
 
-    fetchChunkCollections();
-
-    onCleanup(() => {
-      abortController.abort();
-    });
-  });
+      onCleanup(() => {
+        abortController.abort("cleanup");
+      });
+    }),
+  );
 
   createEffect((prevFiltersKey) => {
     const filtersKey = curDatasetFiltersKey();
@@ -267,17 +287,12 @@ const ResultsPage = (props: ResultsPageProps) => {
       const filters = JSON.parse(
         localStorage.getItem(filtersKey) ?? "{}",
       ) as Filters;
+      props.search.setSearch("version", (prev) => prev + 1);
       setFilters(filters);
     });
 
     return filtersKey;
   }, "");
-
-  createEffect(() => {
-    window.addEventListener("triggerSearch", () => {
-      setTriggerSearch((prev) => !prev);
-    });
-  });
 
   createEffect(() => {
     if (!openChat()) {
@@ -303,12 +318,7 @@ const ResultsPage = (props: ResultsPageProps) => {
       </Show>
       <div class="mt-12 flex w-full flex-col items-center space-y-4">
         <Switch>
-          <Match
-            when={
-              props.loading() ||
-              (resultChunks().length === 0 && !clientSideRequestFinished())
-            }
-          >
+          <Match when={loading()}>
             <div
               class="text-primary inline-block h-12 w-12 animate-spin rounded-full border-4 border-solid border-current border-magenta border-r-transparent align-[-0.125em] motion-reduce:animate-[spin_1.5s_linear_infinite]"
               role="status"
@@ -324,7 +334,7 @@ const ResultsPage = (props: ResultsPageProps) => {
               <p class="text-lg">You may need to adjust your filters</p>
             </div>
           </Match>
-          <Match when={!props.loading() && groupResultChunks().length == 0}>
+          <Match when={!loading() && groupResultChunks().length == 0}>
             <div class="flex w-full max-w-7xl flex-col space-y-4 px-1 min-[360px]:px-4 sm:px-8 md:px-20">
               <For each={resultChunks()}>
                 {(chunk) => (
@@ -338,7 +348,7 @@ const ResultsPage = (props: ResultsPageProps) => {
                       setOnDelete={setOnDelete}
                       setShowConfirmModal={setShowConfirmDeleteModal}
                       showExpand={clientSideRequestFinished()}
-                      defaultShowMetadata={props.slimChunks}
+                      defaultShowMetadata={props.search.state.slimChunks}
                       setChunkGroups={setChunkCollections}
                       setSelectedIds={setSelectedIds}
                       selectedIds={selectedIds}
@@ -350,7 +360,8 @@ const ResultsPage = (props: ResultsPageProps) => {
             <Show when={resultChunks().length > 0}>
               <div class="mx-auto my-12 flex items-center space-x-2">
                 <PaginationController
-                  page={props.page}
+                  setPage={setPage}
+                  page={page()}
                   totalPages={totalPages()}
                 />
               </div>
@@ -422,7 +433,7 @@ const ResultsPage = (props: ResultsPageProps) => {
               </div>
             </div>
           </Match>
-          <Match when={!props.loading() && groupResultChunks().length > 0}>
+          <Match when={!loading() && groupResultChunks().length > 0}>
             <For each={groupResultChunks()}>
               {(group) => {
                 const [groupExpanded, setGroupExpanded] = createSignal(true);
@@ -498,7 +509,8 @@ const ResultsPage = (props: ResultsPageProps) => {
             <Show when={groupResultChunks().length > 0}>
               <div class="mx-auto my-12 flex items-center space-x-2">
                 <PaginationController
-                  page={props.page}
+                  setPage={setPage}
+                  page={page()}
                   totalPages={totalPages()}
                 />
               </div>

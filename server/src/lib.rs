@@ -3,10 +3,13 @@
 
 #[macro_use]
 extern crate diesel;
+
 use crate::{
     errors::{custom_json_error_handler, ServiceError},
     handlers::auth_handler::build_oidc_client,
+    metrics::Metrics,
     operators::{
+        clickhouse_operator::run_clickhouse_migrations,
         qdrant_operator::create_new_qdrant_collection_query, user_operator::create_default_user,
     },
 };
@@ -15,7 +18,7 @@ use actix_identity::IdentityMiddleware;
 use actix_session::{config::PersistentSession, storage::RedisSessionStore, SessionMiddleware};
 use actix_web::{
     cookie::{Key, SameSite},
-    middleware,
+    middleware::Logger,
     web::{self, PayloadConfig},
     App, HttpServer,
 };
@@ -31,10 +34,11 @@ use tracing_subscriber::{prelude::*, EnvFilter, Layer};
 use utoipa_redoc::{Redoc, Servable};
 use utoipa_swagger_ui::SwaggerUi;
 
-pub mod af_middleware;
 pub mod data;
 pub mod errors;
 pub mod handlers;
+pub mod metrics;
+pub mod middleware;
 pub mod operators;
 pub mod randutil;
 
@@ -116,6 +120,10 @@ impl Modify for SecurityAddon {
             "ApiKey",
             SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::new("Authorization"))),
         );
+        components.add_security_scheme(
+            "X-API-KEY",
+            SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::new("X-API-KEY"))),
+        );
     }
 }
 
@@ -133,7 +141,7 @@ impl Modify for SecurityAddon {
             name = "BSL",
             url = "https://github.com/devflowinc/trieve/blob/main/LICENSE.txt",
         ),
-        version = "0.10.7",
+        version = "0.10.8",
     ),
     servers(
         (url = "https://api.trieve.ai",
@@ -176,7 +184,7 @@ impl Modify for SecurityAddon {
         handlers::user_handler::delete_user_api_key,
         handlers::group_handler::search_over_groups,
         handlers::group_handler::get_recommended_groups,
-        handlers::group_handler::get_specific_dataset_chunk_groups,
+        handlers::group_handler::get_groups_for_dataset,
         handlers::group_handler::create_chunk_group,
         handlers::group_handler::delete_chunk_group,
         handlers::group_handler::update_chunk_group,
@@ -215,6 +223,16 @@ impl Modify for SecurityAddon {
         handlers::stripe_handler::cancel_subscription,
         handlers::stripe_handler::update_subscription_plan,
         handlers::stripe_handler::get_all_plans,
+        handlers::analytics_handler::get_overall_topics,
+        handlers::analytics_handler::get_queries_for_topic,
+        handlers::analytics_handler::get_query,
+        handlers::analytics_handler::get_search_metrics,
+        handlers::analytics_handler::get_head_queries,
+        handlers::analytics_handler::get_low_confidence_queries,
+        handlers::analytics_handler::get_all_queries,
+        handlers::analytics_handler::get_rps_graph,
+        handlers::analytics_handler::get_latency_graph,
+        handlers::metrics_handler::get_metrics,
     ),
     components(
         schemas(
@@ -280,7 +298,20 @@ impl Modify for SecurityAddon {
             handlers::dataset_handler::CreateDatasetRequest,
             handlers::dataset_handler::UpdateDatasetRequest,
             handlers::dataset_handler::GetDatasetsPagination,
+            handlers::analytics_handler::GetDatasetMetricsRequest,
+            handlers::analytics_handler::GetHeadQueriesRequest,
+            handlers::analytics_handler::GetAllQueriesRequest,
+            handlers::analytics_handler::GetRPSGraphRequest,
+            data::models::SearchQueryEvent,
+            data::models::SearchClusterTopics,
+            data::models::SearchLatencyGraph,
+            data::models::AnalyticsFilter,
+            data::models::SearchMethod,
+            data::models::SearchType,
             data::models::ApiKeyRespBody,
+            data::models::SearchRPSGraph,
+            data::models::DatasetAnalytics,
+            data::models::HeadQueries,
             data::models::SlimUser,
             data::models::UserOrganization,
             data::models::Topic,
@@ -288,7 +319,6 @@ impl Modify for SecurityAddon {
             data::models::ChunkMetadata,
             data::models::ChatMessageProxy,
             data::models::Event,
-            data::models::SlimGroup,
             data::models::File,
             data::models::ChunkGroup,
             data::models::ChunkGroupAndFile,
@@ -334,6 +364,7 @@ impl Modify for SecurityAddon {
         (name = "message", description = "Message chat endpoint. Messages are units belonging to a topic in the context of a chat with a LLM. There are system, user, and assistant messages."),
         (name = "stripe", description = "Stripe endpoint. Used for the managed SaaS version of this app. Eventually this will become a micro-service. Reach out to the team using contact info found at `docs.trieve.ai` for more information."),
         (name = "health", description = "Health check endpoint. Used to check if the server is up and running."),
+        (name = "metrics", description = "Metrics endpoint. Used to get information for monitoring"),
     ),
 )]
 pub struct ApiDoc;
@@ -471,8 +502,34 @@ pub fn main() -> std::io::Result<()> {
             });
         }
 
+
+        let clickhouse_client = if std::env::var("USE_ANALYTICS").unwrap_or("false".to_string()).parse().unwrap_or(false) {
+            log::info!("Analytics enabled");
+
+            let clickhouse_client = clickhouse::Client::default()
+                .with_url(std::env::var("CLICKHOUSE_URL").unwrap_or("http://localhost:8123".to_string()))
+                .with_user(std::env::var("CLICKHOUSE_USER").unwrap_or("default".to_string()))
+                .with_password(std::env::var("CLICKHOUSE_PASSWORD").unwrap_or("".to_string()))
+                .with_database(std::env::var("CLICKHOUSE_DB").unwrap_or("default".to_string()))
+                .with_option("async_insert", "1")
+                .with_option("wait_for_async_insert", "0");
+
+            run_clickhouse_migrations(&clickhouse_client).await;
+            clickhouse_client
+        } else {
+            log::info!("Analytics disabled");
+            clickhouse::Client::default()
+        };
+
+
+        let metrics = Metrics::new().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to create metrics {:?}", e))
+        })?;
+
+
         HttpServer::new(move || {
             App::new()
+                .wrap(Cors::permissive())
                 .app_data(PayloadConfig::new(134200000))
                 .app_data(json_cfg.clone())
                 .app_data(
@@ -482,15 +539,16 @@ pub fn main() -> std::io::Result<()> {
                 .app_data(web::Data::new(pool.clone()))
                 .app_data(web::Data::new(oidc_client.clone()))
                 .app_data(web::Data::new(redis_pool.clone()))
+                .app_data(web::Data::new(clickhouse_client.clone()))
+                .app_data(web::Data::new(metrics.clone()))
                 .wrap(sentry_actix::Sentry::new())
-                .wrap(af_middleware::auth_middleware::AuthMiddlewareFactory)
+                .wrap(middleware::auth_middleware::AuthMiddlewareFactory)
                 .wrap(
                     IdentityMiddleware::builder()
                         .login_deadline(Some(std::time::Duration::from_secs(SECONDS_IN_DAY)))
                         .visit_deadline(Some(std::time::Duration::from_secs(SECONDS_IN_DAY)))
                         .build(),
                 )
-                .wrap(Cors::permissive())
                 .wrap(
                     SessionMiddleware::builder(
                         redis_store.clone(),
@@ -513,7 +571,7 @@ pub fn main() -> std::io::Result<()> {
                     .cookie_path("/".to_owned())
                     .build(),
                 )
-                .wrap(middleware::Logger::default())
+                .wrap(Logger::default())
                 .service(Redoc::with_url("/redoc", ApiDoc::openapi()))
                 .service(
                     SwaggerUi::new("/swagger-ui/{_:.*}")
@@ -529,6 +587,10 @@ pub fn main() -> std::io::Result<()> {
                 .service(
                     web::resource("/")
                     .route(web::get().to(handlers::auth_handler::health_check))
+                )
+                .service(
+                    web::resource("/metrics")
+                    .route(web::get().to(handlers::metrics_handler::get_metrics))
                 )
                 // everything under '/api/' route
                 .service(
@@ -588,7 +650,7 @@ pub fn main() -> std::io::Result<()> {
                                 )
                                 .service(
                                     web::resource("/groups/{dataset_id}/{page}").route(web::get().to(
-                                        handlers::group_handler::get_specific_dataset_chunk_groups,
+                                        handlers::group_handler::get_groups_for_dataset,
                                     )),
                                 )
                                 .service(web::resource("/files/{dataset_id}/{page}").route(
@@ -902,6 +964,47 @@ pub fn main() -> std::io::Result<()> {
                                     web::resource("/plans")
                                         .route(web::get().to(handlers::stripe_handler::get_all_plans)),
                                 ),
+                        )
+                        .service(
+                            web::scope("/analytics")
+                            .service(
+                                web::resource("/{dataset_id}/topics")
+                                .route(web::get().to(handlers::analytics_handler::get_overall_topics)),
+                            )
+                            .service(
+                                web::resource("/{dataset_id}/metrics")
+                                .route(web::post().to(handlers::analytics_handler::get_search_metrics)),
+                            )
+                            .service(
+                                web::resource("/{dataset_id}/queries")
+                                .route(web::post().to(handlers::analytics_handler::get_all_queries)),
+                            )
+                            .service(
+                                web::resource("/{dataset_id}/rps")
+                                .route(web::post().to(handlers::analytics_handler::get_rps_graph)),
+                            )
+                            .service(
+                                web::resource("/{dataset_id}/latency")
+                                .route(web::post().to(handlers::analytics_handler::get_latency_graph)),
+                            )
+                            .service(
+                                web::resource("/{dataset_id}/query/head")
+                                .route(web::post().to(handlers::analytics_handler::get_head_queries)),
+                            )
+                            .service(
+                                web::resource("/{dataset_id}/query/low_confidence")
+                                .route(web::post().to(handlers::analytics_handler::get_low_confidence_queries)),
+                            )
+                            .service(
+                                web::resource("/{dataset_id}/query/{search_id}")
+                                .route(web::get().to(handlers::analytics_handler::get_query)),
+                            )
+                            .service(
+                                web::resource("/{dataset_id}/{cluster_id}/{page}")
+                                    .route(web::get().to(handlers::analytics_handler::get_queries_for_topic)),
+                            )
+
+
                         ),
                 )
         })

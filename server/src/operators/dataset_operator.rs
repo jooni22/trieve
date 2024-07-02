@@ -5,9 +5,10 @@ use crate::data::models::{
 };
 use crate::get_env;
 use crate::handlers::dataset_handler::GetDatasetsPagination;
+use crate::operators::event_operator::create_event_query;
 use crate::operators::qdrant_operator::get_qdrant_connection;
 use crate::{
-    data::models::{Dataset, Pool},
+    data::models::{Dataset, Event, EventType, Pool},
     errors::ServiceError,
 };
 use actix_web::web;
@@ -171,6 +172,12 @@ pub async fn soft_delete_dataset_by_id_query(
         .await
         .map_err(|_| ServiceError::BadRequest("Could not get database connection".to_string()))?;
 
+    if config.LOCKED {
+        return Err(ServiceError::BadRequest(
+            "Cannot delete a locked dataset".to_string(),
+        ));
+    }
+
     diesel::sql_query(format!(
         "UPDATE datasets SET deleted = 1, tracking_id = NULL WHERE id = '{}'::uuid",
         id
@@ -212,6 +219,11 @@ pub async fn clear_dataset_by_dataset_id_query(
     config: ServerDatasetConfiguration,
     redis_pool: web::Data<RedisPool>,
 ) -> Result<(), ServiceError> {
+    if config.LOCKED {
+        return Err(ServiceError::BadRequest(
+            "Cannot delete a locked dataset".to_string(),
+        ));
+    }
     let mut redis_conn = redis_pool
         .get()
         .await
@@ -237,10 +249,11 @@ pub async fn clear_dataset_by_dataset_id_query(
     Ok(())
 }
 
-#[tracing::instrument(skip(pool))]
+#[tracing::instrument(skip(pool, clickhouse_client))]
 pub async fn delete_chunks_in_dataset(
     id: uuid::Uuid,
     pool: web::Data<Pool>,
+    clickhouse_client: web::Data<clickhouse::Client>,
     config: ServerDatasetConfiguration,
 ) -> Result<(), ServiceError> {
     use crate::data::schema::chunk_metadata::dsl as chunk_metadata_columns;
@@ -267,7 +280,12 @@ pub async fn delete_chunks_in_dataset(
                 chunk_metadata_columns::qdrant_point_id,
             ))
             .order(chunk_metadata_columns::id)
-            .limit(1000)
+            .limit(
+                option_env!("DELETE_CHUNK_BATCH_SIZE")
+                    .unwrap_or("5000")
+                    .parse::<i64>()
+                    .unwrap_or(5000),
+            )
             .load::<(uuid::Uuid, Option<uuid::Uuid>)>(&mut conn)
             .await
             .map_err(|err| {
@@ -300,6 +318,20 @@ pub async fn delete_chunks_in_dataset(
             ServiceError::BadRequest("Could not delete chunks".to_string())
         })?;
 
+        let _ = create_event_query(
+            Event::from_details(
+                id,
+                EventType::BulkChunksDeleted {
+                    message: format!("Deleted {} chunks", chunk_ids.len()),
+                },
+            ),
+            clickhouse_client.clone(),
+        )
+        .await
+        .map_err(|err| {
+            log::error!("Failed to create event: {:?}", err);
+        });
+
         qdrant_client
             .delete_points(
                 qdrant_collection.clone(),
@@ -319,17 +351,18 @@ pub async fn delete_chunks_in_dataset(
     Ok(())
 }
 
-#[tracing::instrument(skip(pool))]
+#[tracing::instrument(skip(pool, clickhouse_client))]
 pub async fn delete_dataset_by_id_query(
     id: uuid::Uuid,
     pool: web::Data<Pool>,
+    clickhouse_client: actix_web::web::Data<clickhouse::Client>,
     config: ServerDatasetConfiguration,
 ) -> Result<Dataset, ServiceError> {
     use crate::data::schema::datasets::dsl as datasets_columns;
 
     let mut conn = pool.get().await.unwrap();
 
-    delete_chunks_in_dataset(id, pool.clone(), config.clone()).await?;
+    delete_chunks_in_dataset(id, pool.clone(), clickhouse_client.clone(), config.clone()).await?;
 
     let dataset: Dataset =
         diesel::delete(datasets_columns::datasets.filter(datasets_columns::id.eq(id)))
@@ -339,6 +372,67 @@ pub async fn delete_dataset_by_id_query(
                 log::error!("Could not delete dataset: {}", err);
                 ServiceError::BadRequest("Could not delete dataset".to_string())
             })?;
+
+    clickhouse_client
+        .query("DELETE FROM default.dataset_events WHERE dataset_id = ?")
+        .bind(id)
+        .execute()
+        .await
+        .map_err(|err| {
+            log::error!("Could not delete dataset events: {}", err);
+            ServiceError::BadRequest("Could not delete dataset events".to_string())
+        })?;
+
+    clickhouse_client
+        .query(
+            "
+        ALTER TABLE default.dataset_events
+        DELETE WHERE dataset_id = ?;
+        ",
+        )
+        .bind(id)
+        .execute()
+        .await
+        .unwrap();
+
+    clickhouse_client
+        .query(
+            "
+        ALTER TABLE default.search_queries
+        DELETE WHERE dataset_id = ?;
+        ",
+        )
+        .bind(id)
+        .execute()
+        .await
+        .unwrap();
+
+    clickhouse_client
+        .query(
+            "
+        ALTER TABLE default.search_cluster_memberships
+        DELETE WHERE cluster_id IN (
+            SELECT id FROM cluster_topics WHERE dataset_id = ?
+        );
+        ",
+        )
+        .bind(id)
+        .execute()
+        .await
+        .unwrap();
+
+    clickhouse_client
+        .query(
+            "
+        ALTER TABLE default.cluster_topics
+        DELETE WHERE dataset_id = ?;
+        ",
+        )
+        .bind(id)
+        .execute()
+        .await
+        .unwrap();
+
     Ok(dataset)
 }
 

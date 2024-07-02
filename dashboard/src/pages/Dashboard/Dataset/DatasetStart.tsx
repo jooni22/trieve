@@ -1,7 +1,8 @@
-import { BiRegularInfoCircle, BiRegularLinkExternal } from "solid-icons/bi";
-import CreateChunkRequest from "../../../components/CreateChunkRequest.md";
-import HybridSearchReqeust from "../../../components/HybridSearchRequest.md";
 import { BuildingSomething } from "../../../components/BuildingSomething";
+import {
+  createChunkRequest,
+  hybridSearchRequest,
+} from "../../../utils/createCodeSnippets";
 import {
   Show,
   createEffect,
@@ -13,17 +14,16 @@ import {
 import { UserContext } from "../../../contexts/UserContext";
 import { useLocation } from "@solidjs/router";
 import { createToast } from "../../../components/ShowToasts";
-import {
-  Dataset,
-  DatasetUsageCount,
-  DefaultError,
-} from "../../../types/apiTypes";
+import { Dataset, DatasetUsageCount, DefaultError } from "shared/types";
 import { DatasetContext } from "../../../contexts/DatasetContext";
 import { FaRegularClipboard } from "solid-icons/fa";
 import { AiOutlineInfoCircle } from "solid-icons/ai";
-import { AddSampleDataModal } from "../../../components/DatasetExampleModal";
+import { TbReload } from "solid-icons/tb";
+import { BiRegularInfoCircle, BiRegularLinkExternal } from "solid-icons/bi";
 import { BsMagic } from "solid-icons/bs";
+import { AddSampleDataModal } from "../../../components/DatasetExampleModal";
 import { Tooltip } from "../../../components/Tooltip";
+import { Codeblock } from "../../../components/Codeblock";
 
 const SAMPLE_DATASET_SIZE = 921;
 
@@ -63,7 +63,6 @@ export const DatasetStart = () => {
 
       if (response.ok) {
         const data = (await response.json()) as unknown as DatasetUsageCount;
-        console.log("Got good repsonse", data);
         return data;
       } else {
         createToast({
@@ -76,6 +75,60 @@ export const DatasetStart = () => {
       }
     },
   );
+
+  const reloadChunkCount = () => {
+    const datasetId = currDatasetId();
+    if (!datasetId) {
+      console.error("Dataset ID is undefined.");
+      return;
+    }
+
+    fetch(`${api_host}/dataset/usage/${datasetId}`, {
+      method: "GET",
+      headers: {
+        "TR-Dataset": datasetId,
+        "Content-Type": "application/json",
+      },
+      credentials: "include",
+    })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error("Failed to fetch dataset usage");
+        }
+        return response.json();
+      })
+      .then((newData) => {
+        const currentUsage = usage();
+        const prevCount = currentUsage?.chunk_count || 0;
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+        const newCount: number = newData.chunk_count as number;
+        const countDifference = newCount - prevCount;
+
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+        mutateUsage(() => newData);
+        createToast({
+          title: "Updated",
+          type: "success",
+          message: `Successfully updated chunk count: ${countDifference} chunk${
+            Math.abs(countDifference) === 1 ? " has" : "s have"
+          } been ${
+            countDifference > 0
+              ? "added"
+              : countDifference < 0
+                ? "removed"
+                : "added or removed"
+          } since last update.`,
+          timeout: 3000,
+        });
+      })
+      .catch((error) => {
+        createToast({
+          title: "Error",
+          type: "error",
+          message: `Failed to reload chunk count: ${error}`,
+        });
+      });
+  };
 
   const [updatedTrackingId, setUpdatedTrackingId] = createSignal<
     string | undefined
@@ -241,6 +294,12 @@ export const DatasetStart = () => {
               <div class="flex items-center space-x-3">
                 <p class="block text-sm font-medium">Chunk Count:</p>
                 <p class="w-fit text-sm">{usage()?.chunk_count || 0}</p>
+                <button
+                  onClick={reloadChunkCount}
+                  class="hover:text-fuchsia-500"
+                >
+                  <TbReload />
+                </button>
               </div>
               <div class="flex items-center space-x-3">
                 <label class="block text-sm font-medium">tracking id:</label>
@@ -279,7 +338,7 @@ export const DatasetStart = () => {
               Initial Request Examples
             </h2>
             <div class="flex flex-col space-y-4">
-              <p>1. Add searchable data</p>
+              <p>1. Add a searchable chunk</p>
               <div class="flex w-fit space-x-4 rounded-md border border-blue-600/20 bg-blue-50 px-4 py-4">
                 <div class="flex">
                   <div class="flex-shrink-0">
@@ -288,28 +347,25 @@ export const DatasetStart = () => {
                   </div>
                   <div class="ml-3">
                     <h3 class="text-sm font-semibold text-blue-800">
-                      This example only uses 3 of 10 potential request
-                      parameters
+                      Create a chunk
                     </h3>
                     <div class="mt-2 text-sm text-blue-700">
                       <p>
                         Read our{" "}
                         <a
-                          href="https://redoc.trieve.ai/redoc#tag/chunk/operation/create_chunk"
+                          href="https://docs.trieve.ai/api-reference/chunk/create-or-upsert-chunk-or-chunks"
                           class="underline"
                         >
-                          OpenAPI docs for chunks
+                          API reference for creating chunks
                         </a>{" "}
-                        to see how to add metadata for filtering, a timestamp
-                        for recency biasing, tags, and more.
+                        to see how to add tags and prices for filtering,
+                        timestamps for recency biasing, and more.
                       </p>
                     </div>
                   </div>
                 </div>
               </div>
-              <div class="rounded-md border-[0.5px] border-neutral-300">
-                <CreateChunkRequest />
-              </div>
+              <Codeblock content={createChunkRequest(currDatasetId())} />
             </div>
             <div class="flex flex-col space-y-4">
               <p class="mt-3">2. Start Searching</p>
@@ -321,27 +377,25 @@ export const DatasetStart = () => {
                   </div>
                   <div class="ml-3">
                     <h3 class="text-sm font-semibold text-blue-800">
-                      This example only uses 3 of 9 potential request parameters
+                      Search chunks
                     </h3>
                     <div class="mt-2 text-sm text-blue-700">
                       <p>
                         Read our{" "}
                         <a
-                          href="https://redoc.trieve.ai/redoc#tag/chunk/operation/search_chunk"
+                          href="https://docs.trieve.ai/api-reference/chunk/search"
                           class="underline"
                         >
-                          OpenAPI docs for search
+                          API reference for searching chunks
                         </a>{" "}
-                        to see how to add filters, manually weight semantic vs.
-                        full-text importance, bias for recency, and more.
+                        to see how to add filters, set highlight parameters,
+                        bias for recency, and more.
                       </p>
                     </div>
                   </div>
                 </div>
               </div>
-              <div class="rounded-md border-[0.5px] border-neutral-300">
-                <HybridSearchReqeust />
-              </div>
+              <Codeblock content={hybridSearchRequest(currDatasetId())} />
             </div>
           </section>
         </div>

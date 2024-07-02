@@ -1,11 +1,11 @@
 use super::auth_handler::{AdminOnly, LoggedUser};
 use crate::{
-    af_middleware::auth_middleware::verify_member,
     data::models::{
         DatasetAndOrgWithSubAndPlan, File, FileAndGroupId, FileWorkerMessage, Pool, RedisPool,
         ServerDatasetConfiguration,
     },
     errors::ServiceError,
+    middleware::auth_middleware::verify_member,
     operators::{
         file_operator::{
             delete_file_query, get_aws_bucket, get_dataset_file_query, get_file_query,
@@ -268,7 +268,7 @@ pub async fn get_file_handler(
     let download_enabled =
         ServerDatasetConfiguration::from_json(dataset_org_plan_sub.dataset.server_configuration)
             .DOCUMENT_DOWNLOAD_FEATURE;
-    if download_enabled {
+    if !download_enabled {
         return Err(
             ServiceError::BadRequest("Document download feature is disabled".to_string()).into(),
         );

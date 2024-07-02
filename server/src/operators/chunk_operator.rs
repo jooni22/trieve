@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::data::models::{
-    ChunkCollision, ChunkGroupBookmark, ChunkMetadataTable, ChunkMetadataTags, ChunkMetadataTypes,
-    ContentChunkMetadata, Dataset, DatasetTags, IngestSpecificChunkMetadata,
+    ChunkCollision, ChunkData, ChunkGroupBookmark, ChunkMetadataTable, ChunkMetadataTags,
+    ChunkMetadataTypes, ContentChunkMetadata, Dataset, DatasetTags, IngestSpecificChunkMetadata,
     ServerDatasetConfiguration, SlimChunkMetadata, SlimChunkMetadataTable, UnifiedId,
 };
 use crate::get_env;
-use crate::handlers::chunk_handler::{BoostPhrase, UploadIngestionMessage};
+use crate::handlers::chunk_handler::UploadIngestionMessage;
 use crate::handlers::chunk_handler::{BulkUploadIngestionMessage, ChunkReqPayload};
 use crate::operators::group_operator::{
     check_group_ids_exist_query, get_group_ids_from_tracking_ids_query,
@@ -641,25 +641,10 @@ pub async fn get_metadata_from_tracking_ids_query(
 #[tracing::instrument(skip(pool))]
 pub async fn bulk_insert_chunk_metadata_query(
     // ChunkMetadata, group_ids, upsert_by_tracking_id
-    mut insertion_data: Vec<(
-        ChunkMetadata,
-        String,
-        Option<Vec<uuid::Uuid>>,
-        bool,
-        Option<BoostPhrase>,
-    )>,
+    mut insertion_data: Vec<ChunkData>,
     dataset_uuid: uuid::Uuid,
     pool: web::Data<Pool>,
-) -> Result<
-    Vec<(
-        ChunkMetadata,
-        String,
-        Option<Vec<uuid::Uuid>>,
-        bool,
-        Option<BoostPhrase>,
-    )>,
-    ServiceError,
-> {
+) -> Result<Vec<ChunkData>, ServiceError> {
     use crate::data::schema::chunk_group_bookmarks::dsl as chunk_group_bookmarks_columns;
     use crate::data::schema::chunk_metadata::dsl as chunk_metadata_columns;
 
@@ -672,7 +657,7 @@ pub async fn bulk_insert_chunk_metadata_query(
     let chunk_metadata_to_insert: Vec<ChunkMetadataTable> = insertion_data
         .clone()
         .iter()
-        .map(|(chunk_metadata, _, _, _, _)| chunk_metadata.clone().into())
+        .map(|data| data.chunk_metadata.clone().into())
         .collect();
 
     let inserted_chunks = diesel::insert_into(chunk_metadata_columns::chunk_metadata)
@@ -691,21 +676,23 @@ pub async fn bulk_insert_chunk_metadata_query(
         })?;
 
     // mutates in place
-    insertion_data.retain(|(chunk_metadata, _, _, _, _)| {
+    insertion_data.retain(|data| {
         inserted_chunks
             .iter()
-            .any(|inserted_chunk| inserted_chunk.id == chunk_metadata.id)
+            .any(|inserted_chunk| inserted_chunk.id == data.chunk_metadata.id)
     });
 
     let chunk_group_bookmarks_to_insert: Vec<ChunkGroupBookmark> = insertion_data
         .clone()
         .iter()
-        .filter_map(|(chunk_metadata, _, group_ids, _, _)| {
-            group_ids.as_ref().map(|group_ids| {
+        .filter_map(|data| {
+            data.group_ids.as_ref().map(|group_ids| {
                 group_ids
                     .clone()
                     .iter()
-                    .map(|group_id| ChunkGroupBookmark::from_details(*group_id, chunk_metadata.id))
+                    .map(|group_id| {
+                        ChunkGroupBookmark::from_details(*group_id, data.chunk_metadata.id)
+                    })
                     .collect::<Vec<ChunkGroupBookmark>>()
             })
         })
@@ -721,8 +708,8 @@ pub async fn bulk_insert_chunk_metadata_query(
     let chunk_tags_to_chunk_id: Vec<(Vec<DatasetTags>, uuid::Uuid)> = insertion_data
         .clone()
         .iter()
-        .filter_map(|(chunk_metadata, _, _, _, _)| {
-            chunk_metadata.clone().tag_set.map(|tags| {
+        .filter_map(|data| {
+            data.chunk_metadata.clone().tag_set.map(|tags| {
                 let tags = tags
                     .into_iter()
                     .filter_map(|maybe_tag| {
@@ -734,7 +721,7 @@ pub async fn bulk_insert_chunk_metadata_query(
                     })
                     .collect_vec();
 
-                (tags, chunk_metadata.id)
+                (tags, data.chunk_metadata.id)
             })
         })
         .collect_vec();
@@ -1766,7 +1753,7 @@ pub fn get_highlights(
         .split_inclusive(|c: char| delimiters.contains(&c.to_string()))
         .flat_map(|x| {
             x.to_string()
-                .split_inclusive(" ")
+                .split_inclusive(' ')
                 .map(|x| x.to_string())
                 .collect::<Vec<String>>()
                 .chunks(max_length.unwrap_or(5) as usize)
@@ -1823,7 +1810,7 @@ pub fn get_highlights(
                 }
                 let slice = get_slice_from_vec_string(split_content.clone(), start)?;
                 let candidate_words = slice
-                    .split_inclusive(" ")
+                    .split_inclusive(' ')
                     .take(half_window as usize - count)
                     .collect::<Vec<&str>>();
                 used_phrases.insert(
@@ -1841,7 +1828,7 @@ pub fn get_highlights(
             let mut count: usize = 0;
             while (count as u32) < half_window {
                 let slice = get_slice_from_vec_string(split_content.clone(), start)?;
-                let split_words = slice.split_inclusive(" ").collect::<Vec<&str>>();
+                let split_words = slice.split_inclusive(' ').collect::<Vec<&str>>();
                 if matched_idxs_set.contains(&start) {
                     break;
                 }
@@ -1884,7 +1871,7 @@ pub fn get_highlights(
             }
         }
         let highlighted_phrase = phrase.replace(
-            &phrase.trim(),
+            phrase.trim(),
             &format!("<mark><b>{}</b></mark>", phrase.trim()),
         );
         let windowed_phrase = format!("{}{}{}", prev_phrase, highlighted_phrase, next_phrase);
@@ -1991,7 +1978,7 @@ pub async fn create_chunk_metadata(
             &chunk.chunk_html.clone(),
             &chunk.link,
             &chunk_tag_set,
-            None,
+            Some(uuid::Uuid::new_v4()),
             chunk.metadata.clone(),
             chunk_tracking_id,
             timestamp,

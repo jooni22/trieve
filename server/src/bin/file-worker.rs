@@ -52,17 +52,6 @@ fn main() {
         None
     };
 
-    let thread_num = if let Ok(thread_num) = std::env::var("THREAD_NUM") {
-        thread_num
-            .parse::<usize>()
-            .expect("THREAD_NUM must be a number")
-    } else {
-        std::thread::available_parallelism()
-            .expect("Failed to get available parallelism")
-            .get()
-            * 2
-    };
-
     let database_url = get_env!("DATABASE_URL", "DATABASE_URL is not set");
 
     let mut config = ManagerConfig::default();
@@ -80,6 +69,29 @@ fn main() {
 
     let web_pool = actix_web::web::Data::new(pool.clone());
 
+    let clickhouse_client = if std::env::var("USE_ANALYTICS")
+        .unwrap_or("false".to_string())
+        .parse()
+        .unwrap_or(false)
+    {
+        log::info!("Analytics enabled");
+
+        clickhouse::Client::default()
+            .with_url(
+                std::env::var("CLICKHOUSE_URL").unwrap_or("http://localhost:8123".to_string()),
+            )
+            .with_user(std::env::var("CLICKHOUSE_USER").unwrap_or("default".to_string()))
+            .with_password(std::env::var("CLICKHOUSE_PASSWORD").unwrap_or("".to_string()))
+            .with_database(std::env::var("CLICKHOUSE_DATABASE").unwrap_or("default".to_string()))
+            .with_option("async_insert", "1")
+            .with_option("wait_for_async_insert", "0")
+    } else {
+        log::info!("Analytics disabled");
+        clickhouse::Client::default()
+    };
+
+    let web_clickhouse_client = actix_web::web::Data::new(clickhouse_client);
+
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -88,9 +100,9 @@ fn main() {
             async move {
                 let redis_url = get_env!("REDIS_URL", "REDIS_URL is not set");
                 let redis_connections: u32 = std::env::var("REDIS_CONNECTIONS")
-                    .unwrap_or("30".to_string())
+                    .unwrap_or("2".to_string())
                     .parse()
-                    .unwrap_or(30);
+                    .unwrap_or(2);
 
                 let redis_manager = bb8_redis::RedisConnectionManager::new(redis_url)
                     .expect("Failed to connect to redis");
@@ -107,21 +119,14 @@ fn main() {
                 let should_terminate = Arc::new(AtomicBool::new(false));
                 signal_hook::flag::register(SIGTERM, Arc::clone(&should_terminate))
                     .expect("Failed to register shutdown hook");
-                let threads: Vec<_> = (0..thread_num)
-                    .map(|i| {
-                        let web_pool = web_pool.clone();
-                        let web_redis_pool = web_redis_pool.clone();
-                        let should_terminate = Arc::clone(&should_terminate);
 
-                        tokio::spawn(async move {
-                            file_worker(should_terminate, i, web_redis_pool, web_pool).await
-                        })
-                    })
-                    .collect();
-
-                while !should_terminate.load(Ordering::Relaxed) {}
-                log::info!("Shutdown signal received, killing all children...");
-                futures::future::join_all(threads).await
+                file_worker(
+                    should_terminate,
+                    web_redis_pool,
+                    web_pool,
+                    web_clickhouse_client,
+                )
+                .await
             }
             .bind_hub(Hub::new_from_top(Hub::current())),
         );
@@ -129,11 +134,11 @@ fn main() {
 
 async fn file_worker(
     should_terminate: Arc<AtomicBool>,
-    thread_num: usize,
     redis_pool: actix_web::web::Data<models::RedisPool>,
     web_pool: actix_web::web::Data<models::Pool>,
+    clickhouse_client: actix_web::web::Data<clickhouse::Client>,
 ) {
-    log::info!("Starting file worker service thread {}", thread_num);
+    log::info!("Starting file worker service thread");
 
     let mut redis_conn_sleep = std::time::Duration::from_secs(1);
 
@@ -210,6 +215,7 @@ async fn file_worker(
         match upload_file(
             file_worker_message.clone(),
             web_pool.clone(),
+            clickhouse_client.clone(),
             redis_connection.clone(),
         )
         .await
@@ -244,10 +250,11 @@ async fn file_worker(
 async fn upload_file(
     file_worker_message: FileWorkerMessage,
     web_pool: actix_web::web::Data<models::Pool>,
+    clickhouse_client: actix_web::web::Data<clickhouse::Client>,
     redis_conn: MultiplexedConnection,
 ) -> Result<Option<uuid::Uuid>, ServiceError> {
-    let file_id = uuid::Uuid::new_v4();
-    // Get file from s3
+    let file_id = file_worker_message.file_id;
+
     let tx_ctx =
         sentry::TransactionContext::new("file worker upload_file", "file worker upload_file");
     let transaction = sentry::start_transaction(tx_ctx);
@@ -257,11 +264,11 @@ async fn upload_file(
 
     let bucket = get_aws_bucket()?;
     let file_data = bucket
-        .get_object(file_worker_message.file_id.clone().to_string())
+        .get_object(file_id.clone().to_string())
         .await
         .map_err(|e| {
-            log::error!("Could not upload file to S3 {:?}", e);
-            ServiceError::BadRequest("Could not upload file to S3".to_string())
+            log::error!("Could not get file from S3 {:?}", e);
+            ServiceError::BadRequest("File is not present in s3".to_string())
         })?
         .as_slice()
         .to_vec();
@@ -333,6 +340,7 @@ async fn upload_file(
         html_content,
         file_worker_message.dataset_org_plan_sub,
         web_pool.clone(),
+        clickhouse_client.clone(),
         redis_conn,
     )
     .await?;
