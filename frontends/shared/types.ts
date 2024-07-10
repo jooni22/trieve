@@ -261,14 +261,14 @@ export interface ApiKeyRespBody {
 export const availableEmbeddingModels = [
   {
     id: "jina-base-en",
-    name: "jina-base-en (securely hosted by Trieve)",
-    url: "https://embedding.trieve.ai",
+    name: "jina-base-en (localhost)",
+    url: "http://localhost:6000",
     dimension: 768,
   },
   {
     id: "bge-m3",
-    name: "bge-m3 (securely hosted by Trieve)",
-    url: "https://embedding.trieve.ai/bge-m3",
+    name: "bge-m3 (localhost)",
+    url: "http://localhost:7000",
     dimension: 1024,
   },
   {
@@ -452,12 +452,6 @@ export interface HeadQuery {
   count: number;
 }
 
-export interface SearchTypeCount {
-  search_type: AnalyticsFilter["search_type"];
-  search_method: AnalyticsFilter["search_method"];
-  search_count: number;
-}
-
 export interface RAGAnalyticsFilter {
   rag_type: "chosen_chunks" | "all_chunks";
 }
@@ -474,32 +468,4 @@ export interface RagQueryEvent {
 
 export interface RAGUsageResponse {
   total_queries: number;
-}
-
-export interface QueryCountResponse {
-  total_queries: SearchTypeCount[];
-}
-
-export interface HeadQueryResponse {
-  queries: HeadQuery[];
-}
-
-export interface SearchQueryResponse {
-  queries: SearchQueryEvent[];
-}
-
-export interface SearchClusterResponse {
-  clusters: SearchClusterTopics[];
-}
-
-export interface RPSGraphResponse {
-  rps_points: RpsDatapoint[];
-}
-
-export interface LatencyGraphResponse {
-  latency_points: LatencyDatapoint[];
-}
-
-export interface RagQueryResponse {
-  queries: RagQueryEvent[];
 }

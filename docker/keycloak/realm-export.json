@@ -766,6 +766,16 @@
       "clientAuthenticatorType": "client-secret",
       "secret": "YllmLDTy67MbsUBrUAWvQ7z9aMq0QcKx",
       "redirectUris": [
+        "https://api.stankiewicz.co/*",
+        "https://analytics.stankiewicz.co/*",
+        "https://search.stankiewicz.co/*",
+        "https://chat.stankiewicz.co/*",
+        "https://dashboard.stankiewicz.co/*",
+        "https://api.stankiewicz.co/*",
+        "https://analytics.stankiewicz.co/*",
+        "https://search.stankiewicz.co/*",
+        "https://chat.stankiewicz.co/*",
+        "https://dashboard.stankiewicz.co/*",
         "http://localhost:8090/*"
       ],
       "webOrigins": [
@@ -785,7 +795,7 @@
         "oidc.ciba.grant.enabled": "false",
         "client.secret.creation.time": "1702168106",
         "backchannel.logout.session.required": "true",
-        "post.logout.redirect.uris": "http://localhost:8090/*",
+        "post.logout.redirect.uris": "http://localhost:8090/*##https://api.stankiewicz.co/*##https://analytics.stankiewicz.co/*##https://search.stankiewicz.co/*##https://chat.stankiewicz.co/*##https://dashboard.stankiewicz.co/*",
         "oauth2.device.authorization.grant.enabled": "false",
         "backchannel.logout.revoke.offline.tokens": "false"
       },

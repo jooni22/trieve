@@ -1,20 +1,18 @@
-# Global options
-{
-    email developer@trieve.ai
+dashboard.stankiewicz.co {
+    reverse_proxy localhost:5173
 }
-
-# Define a site block for chat.trieve.ai
-self-chat.trieve.ai {
-    reverse_proxy localhost:3000
+analytics.stankiewicz.co {
+    reverse_proxy localhost:5176
 }
-
-# Define a site block for api.trieve.ai
-self-api.trieve.ai {
+api.stankiewicz.co {
     reverse_proxy localhost:8090
 }
-
-# Define a site block for search.trieve.ai
-self-search.trieve.ai {
-    reverse_proxy localhost:3001
+search.stankiewicz.co {
+    reverse_proxy localhost:5174
 }
-
+chat.stankiewicz.co {
+    reverse_proxy localhost:5175
+}
+auth.stankiewicz.co {
+    reverse_proxy localhost:8080
+}
