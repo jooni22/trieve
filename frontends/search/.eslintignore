@@ -1,0 +1,4 @@
+postcss.config.cjs
+prettier.config.cjs
+tailwind.config.cjs
+vite.config.ts

@@ -1,0 +1,24 @@
+{
+    acme_ca https://acme.zerossl.com/v2/DV90
+    email   marcin@stankiewicz.co
+}
+dashboard.stankiewicz.co {
+    reverse_proxy localhost:5173
+}
+analytics.stankiewicz.co {
+    reverse_proxy localhost:5176
+}
+api.stankiewicz.co {
+    reverse_proxy localhost:8090
+}
+search.stankiewicz.co {
+    reverse_proxy localhost:5174
+}
+chat.stankiewicz.co {
+    reverse_proxy localhost:5175
+}
+auth.stankiewicz.co {
+    reverse_proxy localhost:8080
+}
+
+

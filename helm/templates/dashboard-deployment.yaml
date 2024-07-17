@@ -1,0 +1,34 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dashboard
+  labels:
+    app.kubernetes.io/name: dashboard
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: Helm
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dashboard
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dashboard
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/managed-by: Helm
+    spec:
+      containers:
+      - name: dashboard
+        image: {{ printf "%s%s:%s" (ternary "trieve/" "localhost:5001/" (ne .Values.environment "local")) "dashboard" .Values.containers.dashboard.tag }}
+        ports:
+          - containerPort: 80
+        env:
+          - name: VITE_API_HOST
+            value: {{ .Values.config.vite.apiHost }}
+          - name: VITE_SEARCH_UI_URL
+            value: {{ .Values.config.vite.searchUiUrl }}
+          - name: VITE_CHAT_UI_URL
+            value: {{ .Values.config.vite.chatUiUrl }}
+          - name: VITE_ANALYTICS_UI_URL
+            value: {{ .Values.config.vite.analyticsUiUrl }}

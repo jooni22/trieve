@@ -1,0 +1,26 @@
+{
+  "name": "config",
+  "version": "1.0.0",
+  "main": "index.js",
+  "license": "MIT",
+  "exports": {
+    "./tsconfig": {
+      "default": "./tsconfig.json"
+    },
+    "./tailwind": {
+      "default": "./tailwind-preset.cjs"
+    },
+    "./prettier": {
+      "default": "./prettier.config.mjs",
+      "import": "./prettier.config.mjs"
+    }
+  },
+  "dependencies": {
+    "tailwind-gradient-mask-image": "^1.2.0",
+    "tailwind-scrollbar": "^3.1.0"
+  },
+  "devDependencies": {
+    "prettier": "3.1.1",
+    "prettier-plugin-tailwindcss": "^0.6.3"
+  }
+}
